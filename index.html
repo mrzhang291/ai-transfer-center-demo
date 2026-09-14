@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>AI 补调中心 Demo</title>
+  <link rel="stylesheet" href="styles.css?v=20260914-fr5">
+  <script defer src="https://cdn.jsdelivr.net/npm/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script defer src="fr-demo-data.js?v=20260914-fr1"></script>
+  <script defer src="app.js?v=20260914-fr4"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="主导航">
+      <div class="brand-lockup">
+        <span class="brand-mark" aria-hidden="true"><i data-lucide="waypoints"></i></span>
+        <span>
+          <strong>AI 补调中心</strong>
+          <small>库存网络决策</small>
+        </span>
+      </div>
+
+      <nav class="main-nav" aria-label="功能导航">
+        <section class="nav-section" aria-labelledby="navDecision">
+          <p class="nav-section-label" id="navDecision">决策</p>
+          <button class="nav-item is-active" type="button" data-tab="overview" aria-current="page">
+            <i data-lucide="layout-dashboard" aria-hidden="true"></i><span>运营总览</span>
+          </button>
+          <button class="nav-item" type="button" data-tab="plans">
+            <i data-lucide="sparkles" aria-hidden="true"></i><span>补调方案</span><span class="nav-count" id="plansNavCount" hidden></span>
+          </button>
+        </section>
+        <section class="nav-section" aria-labelledby="navExecution">
+          <p class="nav-section-label" id="navExecution">执行</p>
+          <button class="nav-item" type="button" data-tab="orders">
+            <i data-lucide="package-check" aria-hidden="true"></i><span>调拨单</span><span class="nav-count" id="ordersNavCount" hidden></span>
+          </button>
+          <button class="nav-item" type="button" data-tab="fulfillment">
+            <i data-lucide="route" aria-hidden="true"></i><span>履约中心</span><span class="nav-count" id="fulfillmentNavCount" hidden></span>
+          </button>
+        </section>
+        <section class="nav-section" aria-labelledby="navConfiguration">
+          <p class="nav-section-label" id="navConfiguration">配置</p>
+          <button class="nav-item" type="button" data-tab="data">
+            <i data-lucide="database-zap" aria-hidden="true"></i><span>数据接入</span><span class="nav-count" id="dataNavCount" hidden></span>
+          </button>
+          <button class="nav-item" type="button" data-tab="rules">
+            <i data-lucide="sliders-horizontal" aria-hidden="true"></i><span>策略中心</span>
+          </button>
+        </section>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="snapshot-card">
+          <span class="snapshot-icon" aria-hidden="true"><i data-lucide="database"></i></span>
+          <div>
+            <strong id="snapshotTitle">FR 测试库快照</strong>
+            <span id="snapshotCopy">仅本机演示，不回写源库</span>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <div class="app-main">
+      <header class="topbar">
+        <div class="breadcrumb">
+          <span id="pageKicker">经营工作台</span>
+          <h1 id="pageTitle">运营总览</h1>
+        </div>
+        <div class="topbar-actions">
+          <span class="snapshot-tag" id="snapshotTag"><i data-lucide="lock-keyhole" aria-hidden="true"></i>读取快照，不回写源库</span>
+          <button class="icon-button" type="button" id="openAi" aria-label="打开 AI 助手" data-tooltip="AI 业务指令">
+            <i data-lucide="sparkles" aria-hidden="true"></i>
+          </button>
+          <button class="secondary-button topbar-reset" type="button" id="resetDemo">
+            <i data-lucide="rotate-ccw" aria-hidden="true"></i>重置演示
+          </button>
+          <button class="primary-button" type="button" id="runOptimization">
+            <i data-lucide="refresh-cw" aria-hidden="true"></i>重新优化
+          </button>
+        </div>
+      </header>
+
+      <main class="content-area">
+        <section class="tab-panel is-visible" id="overviewPanel" data-panel="overview">
+          <div class="page-intro">
+            <div>
+              <p class="eyebrow">运营概览</p>
+              <h2>本轮运营待办</h2>
+              <p>基于当前库存与销量快照生成补调建议；审核确认后进入调拨执行。</p>
+            </div>
+            <div class="run-status" aria-live="polite">
+              <span class="status-dot" aria-hidden="true"></span>
+              <span id="lastRunLabel">已按当前规则完成本轮计算</span>
+            </div>
+          </div>
+
+          <section class="action-hub" aria-labelledby="actionHubHeading">
+            <div class="action-hub-heading">
+              <p class="eyebrow">待处理事项</p>
+              <h3 id="actionHubHeading">按风险等级处理</h3>
+            </div>
+            <div class="action-hub-grid">
+              <button class="action-card is-critical" type="button" data-action="open-plans">
+                <span class="action-card-icon" aria-hidden="true"><i data-lucide="triangle-alert"></i></span>
+                <span><strong id="priorityActionValue">0 个</strong><small id="priorityActionNote">高风险缺货待处理</small></span>
+                <i class="action-card-arrow" data-lucide="arrow-right" aria-hidden="true"></i>
+              </button>
+              <button class="action-card is-warning" type="button" data-action="open-orders">
+                <span class="action-card-icon" aria-hidden="true"><i data-lucide="clipboard-check"></i></span>
+                <span><strong id="approvalActionValue">0 单</strong><small id="approvalActionNote">等待总部审核</small></span>
+                <i class="action-card-arrow" data-lucide="arrow-right" aria-hidden="true"></i>
+              </button>
+              <button class="action-card" type="button" data-action="open-data">
+                <span class="action-card-icon" aria-hidden="true"><i data-lucide="database-zap"></i></span>
+                <span><strong id="dataActionValue">0 类</strong><small id="dataActionNote">经营资料待补充</small></span>
+                <i class="action-card-arrow" data-lucide="arrow-right" aria-hidden="true"></i>
+              </button>
+            </div>
+          </section>
+
+          <section class="workflow-strip" aria-label="补调执行流程">
+            <button class="workflow-step" type="button" data-action="open-data">
+              <span class="workflow-index">1</span><span><strong>接入数据</strong><small id="dataWorkflowStatus">库存与销量快照已就绪</small></span>
+            </button>
+            <span class="workflow-connector" aria-hidden="true"></span>
+            <button class="workflow-step" type="button" data-action="open-rules">
+              <span class="workflow-index">2</span><span><strong>设定策略</strong><small id="rulesWorkflowStatus">使用当前经营规则</small></span>
+            </button>
+            <span class="workflow-connector" aria-hidden="true"></span>
+            <button class="workflow-step is-current" type="button" data-action="run-optimization">
+              <span class="workflow-index">3</span><span><strong>生成方案</strong><small id="optimizationWorkflowStatus">本轮建议待审核</small></span>
+            </button>
+            <span class="workflow-connector" aria-hidden="true"></span>
+            <button class="workflow-step" type="button" data-action="open-orders">
+              <span class="workflow-index">4</span><span><strong>审核执行</strong><small id="executionWorkflowStatus">查看合并调拨单</small></span>
+            </button>
+          </section>
+
+          <div class="metric-grid" aria-label="本轮经营指标">
+            <article class="metric-card">
+              <span class="metric-label">高风险事项</span>
+              <strong class="metric-value" id="metricUrgent">0</strong>
+              <span class="metric-note" id="metricUrgentNote">高缺货风险 SKU</span>
+            </article>
+            <article class="metric-card">
+              <span class="metric-label">预计守住销售额</span>
+              <strong class="metric-value" id="metricSales">¥0</strong>
+              <span class="metric-note">按近期动销与目标库存测算</span>
+            </article>
+            <article class="metric-card">
+              <span class="metric-label">预计增量贡献</span>
+              <strong class="metric-value" id="metricContribution">¥0</strong>
+              <span class="metric-note">扣除演示运价试算，不是实际账单</span>
+            </article>
+            <article class="metric-card">
+              <span class="metric-label">预计包裹</span>
+              <strong class="metric-value" id="metricPackages">0</strong>
+              <span class="metric-note" id="metricPackagesNote">相较逐 SKU 调拨可减少 0 个</span>
+            </article>
+          </div>
+
+          <div class="insight-grid">
+            <section class="panel optimization-comparison" aria-labelledby="comparisonHeading">
+              <div class="panel-header">
+                <div><p class="eyebrow">方案对比</p><h3 id="comparisonHeading">方案执行前后对比</h3></div>
+                <i data-lucide="chart-no-axes-combined" aria-hidden="true"></i>
+              </div>
+              <div class="comparison-grid" id="optimizationComparison"></div>
+            </section>
+
+            <section class="panel readiness-panel" aria-labelledby="readinessHeading">
+              <div class="panel-header">
+                <div><p class="eyebrow">数据口径</p><h3 id="readinessHeading">本轮数据状态</h3></div>
+                <i data-lucide="badge-check" aria-hidden="true"></i>
+              </div>
+              <div class="readiness-list" id="dataReadiness"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="tab-panel" id="plansPanel" data-panel="plans" hidden>
+          <div class="page-intro compact-intro">
+            <div>
+              <p class="eyebrow">方案审核</p>
+              <h2>补调方案</h2>
+              <p>先看缺货风险和预计贡献，再逐条确认来源、数量、成本与审批要求。</p>
+            </div>
+            <button class="secondary-button" type="button" id="openOrders"><i data-lucide="package-check" aria-hidden="true"></i>查看调拨单</button>
+          </div>
+
+          <div class="filter-row plan-filter-row" aria-label="筛选调拨建议">
+            <label class="field-inline" for="scopeSelect">
+              <span>网络范围</span>
+              <select class="select-control" id="scopeSelect">
+                <option value="all">全国网络</option>
+                <option value="north">华北门店组</option>
+                <option value="east">华东门店组</option>
+                <option value="central">华中门店组</option>
+                <option value="south">福建门店组</option>
+              </select>
+            </label>
+            <label class="field-inline" for="statusSelect">
+              <span>处理状态</span>
+              <select class="select-control" id="statusSelect">
+                <option value="all">全部建议</option>
+                <option value="pending">待审核</option>
+                <option value="arrival">到货预警</option>
+                <option value="hold">暂不建议</option>
+                <option value="flow">履约中</option>
+              </select>
+            </label>
+            <span class="network-context" id="networkContext">当前快照：仅本机演示数据</span>
+            <div class="filter-spacer"></div>
+            <span class="result-count" id="resultCount">0 条建议</span>
+          </div>
+
+          <section class="plan-command-strip" id="planCommandStrip" aria-label="本轮补调决策概览"></section>
+
+          <div class="overview-workspace">
+            <section class="panel recommendation-panel" aria-labelledby="recommendationHeading">
+              <div class="panel-header">
+                <div>
+                  <p class="eyebrow">待决策清单</p>
+                  <h3 id="recommendationHeading">先处理风险，再确认经济账</h3>
+                </div>
+              </div>
+              <div class="table-scroll">
+                <table class="data-table recommendation-table" aria-describedby="recommendationHeading">
+                  <colgroup>
+                    <col class="plan-col-item">
+                    <col class="plan-col-target">
+                    <col class="plan-col-route">
+                    <col class="plan-col-economics">
+                  </colgroup>
+                  <thead>
+                    <tr>
+                      <th scope="col">优先级与补调商品</th>
+                      <th scope="col">调入门店（目的地）与库存缺口</th>
+                      <th scope="col">调出门店（货源）与时效</th>
+                      <th scope="col" class="number">调拨经济账</th>
+                    </tr>
+                  </thead>
+                  <tbody id="recommendationBody"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <aside class="panel detail-panel" aria-live="polite" aria-label="所选调拨建议详情" id="detailPanel"></aside>
+          </div>
+        </section>
+
+        <section class="tab-panel" id="ordersPanel" data-panel="orders" hidden>
+          <div class="page-intro compact-intro">
+            <div>
+              <p class="eyebrow">执行输出</p>
+              <h2>按来源与目的地合并后的调拨单</h2>
+              <p>同一路线的多个 SKU 合单发出；包裹数与物流成本均为按当前试算参数估算。</p>
+            </div>
+            <button class="primary-button" type="button" id="exportAllOrders"><i data-lucide="download" aria-hidden="true"></i>导出调拨单</button>
+          </div>
+          <div class="orders-layout" id="ordersList"></div>
+        </section>
+
+        <section class="tab-panel" id="fulfillmentPanel" data-panel="fulfillment" hidden>
+          <div class="page-intro compact-intro">
+            <div>
+              <p class="eyebrow">端到端闭环</p>
+              <h2>从审核到收货，再到库存重算</h2>
+              <p>所有状态仅在本机 Demo 中模拟，不会写回 FR 测试库。</p>
+            </div>
+          </div>
+          <div class="role-row" role="group" aria-label="演示角色">
+            <button class="role-button is-selected" type="button" data-role="hq"><i data-lucide="landmark" aria-hidden="true"></i>总部运营</button>
+            <button class="role-button" type="button" data-role="source"><i data-lucide="package-open" aria-hidden="true"></i>调出店</button>
+            <button class="role-button" type="button" data-role="target"><i data-lucide="package-check" aria-hidden="true"></i>调入店</button>
+            <button class="role-button" type="button" data-role="admin"><i data-lucide="shield-check" aria-hidden="true"></i>管理员</button>
+          </div>
+          <div class="fulfillment-layout">
+            <section class="panel lifecycle-panel" aria-labelledby="lifecycleHeading">
+              <div class="panel-header">
+                <div>
+                  <p class="eyebrow">当前调拨单</p>
+                  <h3 id="lifecycleHeading">当前选中调拨单</h3>
+                </div>
+                <span class="status-pill" id="lifecycleStatus">待总部审核</span>
+              </div>
+              <ol class="lifecycle" id="lifecycleSteps"></ol>
+              <div class="lifecycle-actions" id="lifecycleActions"></div>
+            </section>
+            <section class="panel event-panel" aria-labelledby="eventHeading">
+              <div class="panel-header">
+                <div>
+                  <p class="eyebrow">操作记录</p>
+                  <h3 id="eventHeading">本机模拟事件</h3>
+                </div>
+              </div>
+              <div class="event-list" id="eventList"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="tab-panel" id="rulesPanel" data-panel="rules" hidden>
+          <div class="page-intro compact-intro">
+            <div>
+              <p class="eyebrow">经营规则</p>
+              <h2>让业务策略参与优化，而不是被算法覆盖</h2>
+              <p>改动参数不会触碰源库；点击重新优化后仅更新本机模拟结果。</p>
+            </div>
+            <button class="primary-button" type="button" id="applyRules"><i data-lucide="play" aria-hidden="true"></i>应用并重算</button>
+          </div>
+
+          <div class="rules-grid">
+            <section class="panel rule-section">
+              <div class="panel-header"><div><p class="eyebrow">库存策略</p><h3>目标库存与来源保护</h3></div><i data-lucide="boxes" aria-hidden="true"></i></div>
+              <label class="number-field" for="coverageDays"><span>目标覆盖天数</span><span class="number-field-control"><input class="numeric-control" id="coverageDays" type="number" min="1" max="60" step="1" value="7"><b>天</b></span></label>
+              <label class="number-field" for="urgentCoverageDays"><span>紧急风险线</span><span class="number-field-control"><input class="numeric-control" id="urgentCoverageDays" type="number" min="0.5" max="30" step="0.5" value="2"><b>天</b></span></label>
+              <label class="number-field" for="demandBufferDays"><span>动销波动缓冲</span><span class="number-field-control"><input class="numeric-control" id="demandBufferDays" type="number" min="0" max="14" step="0.5" value="0.5"><b>天</b></span></label>
+              <label class="number-field" for="sourceProtectionDays"><span>调出店保护天数</span><span class="number-field-control"><input class="numeric-control" id="sourceProtectionDays" type="number" min="1" max="60" step="1" value="7"><b>天</b></span></label>
+              <label class="select-field" for="strategicStore"><span>战略门店</span><select class="select-control" id="strategicStore"><option value="BJSR04">北京 apm 三丽鸥</option><option value="BJSR02">北京合生汇三丽鸥</option><option value="none">不设战略门店</option></select></label>
+              <label class="check-line"><input type="checkbox" checked disabled><span>调出店动态保护库存作为硬约束</span></label>
+              <label class="check-line"><input type="checkbox" checked disabled><span>仅已确认且保护期内到货的在途计入库存位置</span></label>
+              <label class="check-line"><input type="checkbox" checked disabled><span>在途 ETA 晚于预计断货日时自动升级加急</span></label>
+              <p class="rule-note">补调量按目标库存减库存位置计算；无 ETA 的在途继续按不可用处理。确认在途即使计入库存位置，也必须在断货前送达，否则优先寻找更快线路并升级处理。</p>
+            </section>
+
+            <section class="panel rule-section">
+              <div class="panel-header"><div><p class="eyebrow">全网分配</p><h3>共享货源与等待窗口</h3></div><i data-lucide="network" aria-hidden="true"></i></div>
+              <label class="number-field" for="minimumTransferQuantity"><span>非紧急最小调拨量</span><span class="number-field-control"><input class="numeric-control" id="minimumTransferQuantity" type="number" min="1" max="10000" step="1" value="2"><b>件</b></span></label>
+              <label class="number-field" for="minimumNetContribution"><span>合单最低净贡献</span><span class="number-field-control"><b>¥</b><input class="numeric-control" id="minimumNetContribution" type="number" min="0" max="1000000" step="10" value="0"></span></label>
+              <label class="check-line"><input type="checkbox" checked disabled><span>同一 SKU 的来源余量全网共享</span></label>
+              <label class="check-line"><input type="checkbox" checked disabled><span>先保高风险与战略门店，再分配富余</span></label>
+              <p class="rule-note" id="allocationRuleStatus">按风险、门店优先级、线路时效和合单增量成本分配。</p>
+            </section>
+
+            <section class="panel rule-section">
+              <div class="panel-header"><div><p class="eyebrow">收益判断</p><h3>毛利与审批阈值</h3></div><i data-lucide="circle-dollar-sign" aria-hidden="true"></i></div>
+              <label class="number-field" for="grossMargin"><span>默认毛利率</span><span class="number-field-control"><input class="numeric-control" id="grossMargin" type="number" min="0" max="100" step="0.1" value="46"><b>%</b></span></label>
+              <label class="number-field" for="approvalThreshold"><span>升级审批贡献阈值</span><span class="number-field-control"><b>¥</b><input class="numeric-control" id="approvalThreshold" type="number" min="0" max="1000000" step="500" value="5000"></span></label>
+              <p class="rule-note">高金额、跨城或改变来源的替代方案，会重新进入审核队列。</p>
+            </section>
+
+            <section class="panel rule-section">
+              <div class="panel-header"><div><p class="eyebrow">物流试算参数</p><h3>包裹与线路成本</h3></div><i data-lucide="truck" aria-hidden="true"></i></div>
+              <label class="number-field" for="sameCityCost"><span>同城单包回退价</span><span class="number-field-control"><b>¥</b><input class="numeric-control" id="sameCityCost" type="number" min="0" max="10000" step="0.1" value="10"><b>/ 包</b></span></label>
+              <label class="number-field" for="crossCityCost"><span>跨城单包回退价</span><span class="number-field-control"><b>¥</b><input class="numeric-control" id="crossCityCost" type="number" min="0" max="10000" step="0.1" value="22"><b>/ 包</b></span></label>
+              <label class="number-field" for="parcelCapacity"><span>默认单包容量</span><span class="number-field-control"><input class="numeric-control" id="parcelCapacity" type="number" min="1" max="10000" step="1" value="60"><b>件</b></span></label>
+              <label class="check-line"><input id="allowFallbackRates" type="checkbox" checked><span>允许未维护线路参与演示试算</span></label>
+              <p class="rule-note cost-model-note">关闭后，未命中运价表的路线不会生成建议。真实线路与包装参数请在数据接入维护。</p>
+            </section>
+
+            <section class="panel rule-section ai-rule-section">
+              <div class="panel-header"><div><p class="eyebrow">AI 业务指令</p><h3>用一句需求发起策略变更</h3></div><i data-lucide="bot" aria-hidden="true"></i></div>
+              <textarea class="command-input" id="rulesCommand" rows="4" placeholder="例如：把北京 apm 设为战略店；非紧急少于 3 件不调；最低净贡献 50 元"></textarea>
+              <div class="command-actions"><button class="secondary-button" type="button" id="interpretRulesCommand"><i data-lucide="scan-text" aria-hidden="true"></i>解析指令</button><span id="rulesCommandStatus" aria-live="polite"></span></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="tab-panel" id="dataPanel" data-panel="data" hidden>
+          <div class="page-intro compact-intro">
+            <div>
+              <p class="eyebrow">试点数据</p>
+              <h2>把经营边界接进补调决策</h2>
+              <p>库存、销量与商品主数据来自当前系统快照；以下资料可按试点范围本机导入。</p>
+            </div>
+          </div>
+
+          <div class="data-grid">
+            <section class="panel data-section">
+              <div class="panel-header"><div><p class="eyebrow">经营快照</p><h3>库存、销量与确认在途</h3></div><i data-lucide="chart-no-axes-combined" aria-hidden="true"></i></div>
+              <div class="upload-actions">
+                <input class="visually-hidden" id="operatingSnapshotFile" type="file" accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel">
+                <label class="secondary-button upload-file-button" for="operatingSnapshotFile"><i data-lucide="upload" aria-hidden="true"></i>上传经营快照</label>
+                <button class="secondary-button" type="button" data-action="download-snapshot-template"><i data-lucide="file-down" aria-hidden="true"></i>下载模板</button>
+              </div>
+              <p class="upload-status" id="operatingSnapshotStatus" aria-live="polite">未上传，当前采用演示经营快照。</p>
+              <p class="rule-note">字段：货号、门店编码；当前实物、近 28 天销量或日均动销、活动系数、确认在途数量与 ETA 均可选。</p>
+            </section>
+
+            <section class="panel data-section">
+              <div class="panel-header"><div><p class="eyebrow">物流规则</p><h3>线路运价表</h3></div><i data-lucide="truck" aria-hidden="true"></i></div>
+              <div class="upload-actions">
+                <input class="visually-hidden" id="rateCardFile" type="file" accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel">
+                <label class="secondary-button upload-file-button" for="rateCardFile"><i data-lucide="upload" aria-hidden="true"></i>上传运价表</label>
+                <button class="secondary-button" type="button" data-action="download-rate-template"><i data-lucide="file-down" aria-hidden="true"></i>下载模板</button>
+              </div>
+              <p class="upload-status" id="rateCardStatus" aria-live="polite">未上传，当前采用演示试算价。</p>
+              <p class="rule-note">字段：来源门店编码、目的门店编码、单包成本；预计时效（天）可选。</p>
+            </section>
+
+            <section class="panel data-section">
+              <div class="panel-header"><div><p class="eyebrow">商品经营</p><h3>毛利与包装参数</h3></div><i data-lucide="package-search" aria-hidden="true"></i></div>
+              <div class="upload-actions">
+                <input class="visually-hidden" id="productParametersFile" type="file" accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel">
+                <label class="secondary-button upload-file-button" for="productParametersFile"><i data-lucide="upload" aria-hidden="true"></i>上传商品参数</label>
+                <button class="secondary-button" type="button" data-action="download-product-template"><i data-lucide="file-down" aria-hidden="true"></i>下载模板</button>
+              </div>
+              <p class="upload-status" id="productParametersStatus" aria-live="polite">未上传，当前采用全局毛利与单包容量试算。</p>
+              <p class="rule-note">字段：货号；毛利率、单包容量、商品生命周期均可选。</p>
+            </section>
+
+            <section class="panel data-section">
+              <div class="panel-header"><div><p class="eyebrow">门店运营</p><h3>库容与调拨限制</h3></div><i data-lucide="store" aria-hidden="true"></i></div>
+              <div class="upload-actions">
+                <input class="visually-hidden" id="storeConstraintsFile" type="file" accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel">
+                <label class="secondary-button upload-file-button" for="storeConstraintsFile"><i data-lucide="upload" aria-hidden="true"></i>上传门店约束</label>
+                <button class="secondary-button" type="button" data-action="download-store-template"><i data-lucide="file-down" aria-hidden="true"></i>下载模板</button>
+              </div>
+              <p class="upload-status" id="storeConstraintsStatus" aria-live="polite">未上传，当前仅按安全库存与统一目标库存计算。</p>
+              <p class="rule-note">字段：门店编码；库容上限、最低陈列量、优先级调整、允许调入/调出均可选。</p>
+            </section>
+          </div>
+          <p class="data-privacy-note"><i data-lucide="lock-keyhole" aria-hidden="true"></i>上传文件仅在当前浏览器读取，用于本机模拟；不会上传、不会回写 FR 测试库。</p>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <aside class="ai-drawer" id="aiDrawer" aria-label="AI 业务助手" aria-hidden="true">
+    <div class="drawer-header">
+      <div><p class="eyebrow">AI 业务助手</p><h2>把经营要求转成规则</h2></div>
+      <button class="icon-button" type="button" id="closeAi" aria-label="关闭 AI 助手" data-tooltip="关闭"><i data-lucide="x" aria-hidden="true"></i></button>
+    </div>
+    <p class="drawer-copy">解析结果会先让你确认；确认后才更新本机策略并重算。</p>
+    <textarea class="command-input" id="aiCommand" rows="5" placeholder="输入业务要求"></textarea>
+    <div class="command-suggestions" aria-label="示例业务要求">
+      <button type="button" data-command="把北京 apm 设为战略店">北京 apm 设为战略店</button>
+      <button type="button" data-command="跨城单包按 30 元计算">跨城单包按 30 元</button>
+      <button type="button" data-command="目标库存覆盖 10 天">目标库存覆盖 10 天</button>
+    </div>
+    <button class="primary-button drawer-submit" type="button" id="interpretAi"><i data-lucide="wand-sparkles" aria-hidden="true"></i>解析并预览</button>
+    <div class="ai-interpretation" id="aiInterpretation" hidden></div>
+  </aside>
+  <div class="drawer-backdrop" id="drawerBackdrop" hidden></div>
+  <div class="toast" id="toast" aria-live="polite" role="status"></div>
+</body>
+</html>

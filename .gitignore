@@ -1,0 +1,19 @@
+# Local browser profiles and generated document assets
+doc-assets/
+hd-doc-images/
+
+# Captures, recordings, and diagram exports
+*.png
+*.mp4
+recording-concat.txt
+archify-*
+annotated-captures.html
+focus-captures.html
+annotate-hd-doc-images.js
+render-hd-doc-images.js
+*.xml
+
+# Local dependencies and operating-system files
+node_modules/
+.DS_Store
+Thumbs.db
