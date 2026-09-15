@@ -265,7 +265,8 @@ const state = {
   inTransitTransfers: new Map(),
   flow: createInitialFlow(),
   pendingChanges: [],
-  lastRun: "已按当前规则完成本轮计算"
+  lastRun: "已按当前规则完成本轮计算",
+  calculationAt: new Date()
 };
 
 const initialSettings = { ...state.settings };
@@ -349,8 +350,13 @@ function formatNumber(value) {
   return numberFormatter.format(Math.round(value));
 }
 
+function isStrategicStore(storeCode) {
+  return state.settings.strategicStore !== "none"
+    && String(storeCode).trim().toUpperCase() === state.settings.strategicStore;
+}
+
 function isStrategic(record) {
-  return state.settings.strategicStore !== "none" && record.target.code === state.settings.strategicStore;
+  return isStrategicStore(record.target.code);
 }
 
 function routeKey(sourceCode, targetCode) {
@@ -361,12 +367,52 @@ function skuKey(sku) {
   return String(sku).trim().toUpperCase();
 }
 
+function normalizeCity(value) {
+  return String(value || "").trim();
+}
+
+function parseCityScope(value) {
+  const normalized = String(value || "").trim();
+  if (!normalized) return null;
+  if (/^(全国|不限|全部|全量|all|\*)$/i.test(normalized)) return [];
+  return [...new Set(normalized
+    .split(/[、,，;；|/\s]+/)
+    .map(normalizeCity)
+    .filter(Boolean))];
+}
+
+function inferCityScope(record) {
+  const productName = String(record.product || "");
+  const cities = [...new Set([record.target?.city, ...(record.sources || []).map((source) => source.city)])]
+    .map(normalizeCity)
+    .filter(Boolean)
+    .sort((left, right) => right.length - left.length);
+  const matchedCity = cities.find((city) => productName.includes(`${city}限定`) || productName.includes(`${city}城市限定`));
+  return matchedCity ? [matchedCity] : null;
+}
+
+function isCityAllowed(productParameters, city) {
+  const normalizedCity = normalizeCity(city);
+  return !productParameters.allowedCities?.length || productParameters.allowedCities.includes(normalizedCity);
+}
+
+function getCityScopeLabel(productParameters) {
+  return productParameters.allowedCities?.length ? productParameters.allowedCities.join("、") : "不限城市";
+}
+
+function getStorePriorityMultiplier(storeCode) {
+  const constraint = getStoreConstraint(storeCode);
+  const strategicMultiplier = isStrategicStore(storeCode) ? 1.15 : 1;
+  return Math.max(0.1, strategicMultiplier * (1 + constraint.priorityAdjustment / 100));
+}
+
 function getProductParameters(record) {
   const imported = state.productParameters.records.get(skuKey(record.sku));
   return {
     grossMargin: Number.isFinite(imported?.grossMargin) ? imported.grossMargin : state.settings.grossMargin,
     parcelCapacity: Number.isFinite(imported?.parcelCapacity) ? imported.parcelCapacity : state.settings.parcelCapacity,
     lifecycle: imported?.lifecycle || "未维护",
+    allowedCities: imported?.allowedCities ?? inferCityScope(record),
     isImported: Boolean(imported)
   };
 }
@@ -392,27 +438,77 @@ function getFallbackRouteQuote(source, target) {
   return {
     parcelCost: isSameCity ? state.settings.sameCityCost : state.settings.crossCityCost,
     etaDays: isSameCity ? 0.5 : 2,
+    etaHours: isSameCity ? 12 : 48,
+    handlingHours: 0,
+    receivingHours: 0,
+    cutoffHour: null,
+    cutoffDelayHours: 0,
+    volatilityHours: 0,
     rateSource: "演示试算价",
     isFallback: true
+  };
+}
+
+function getCalculationHour() {
+  const calculationAt = state.calculationAt instanceof Date ? state.calculationAt : new Date();
+  return calculationAt.getHours() + calculationAt.getMinutes() / 60;
+}
+
+function addRouteTiming(quote) {
+  const etaHours = Number.isFinite(quote.etaHours)
+    ? quote.etaHours
+    : (Number.isFinite(quote.etaDays) ? quote.etaDays * 24 : null);
+  if (!Number.isFinite(etaHours)) {
+    return { ...quote, etaDays: null, etaHours: null, cutoffWaitHours: 0, hasTimeBreakdown: false };
+  }
+  const cutoffHour = Number.isFinite(quote.cutoffHour) ? quote.cutoffHour : null;
+  const cutoffWaitHours = cutoffHour !== null && getCalculationHour() > cutoffHour
+    ? Math.max(0, Number(quote.cutoffDelayHours) || 24)
+    : 0;
+  const handlingHours = Math.max(0, Number(quote.handlingHours) || 0);
+  const receivingHours = Math.max(0, Number(quote.receivingHours) || 0);
+  const volatilityHours = Math.max(0, Number(quote.volatilityHours) || 0);
+  const totalEtaHours = etaHours + handlingHours + receivingHours + volatilityHours + cutoffWaitHours;
+  return {
+    ...quote,
+    etaHours: totalEtaHours,
+    etaDays: totalEtaHours / 24,
+    cutoffWaitHours,
+    hasTimeBreakdown: Boolean(cutoffHour !== null || handlingHours || receivingHours || volatilityHours)
   };
 }
 
 function getRouteQuote(source, target) {
   const importedQuote = state.rateCard.routes.get(routeKey(source.code, target.code));
   if (importedQuote) {
-    return {
+    return addRouteTiming({
       ...importedQuote,
       rateSource: "上传运价表",
       isFallback: false
-    };
+    });
   }
-  return getFallbackRouteQuote(source, target);
+  return addRouteTiming(getFallbackRouteQuote(source, target));
 }
 
 function formatEta(etaDays) {
   if (!Number.isFinite(etaDays)) return "待维护";
   if (etaDays === 0) return "当日";
-  return `${etaDays} 天`;
+  if (etaDays < 1) return `${Math.round(etaDays * 24)} 小时`;
+  return `${etaDays.toFixed(1)} 天`;
+}
+
+function formatCoverageDays(value) {
+  if (!Number.isFinite(value)) return "无动销基准";
+  return `${value.toFixed(1)} 天`;
+}
+
+function formatRouteTiming(quote) {
+  const parts = [];
+  if (quote.cutoffWaitHours) parts.push(`截单顺延 ${formatEta(quote.cutoffWaitHours / 24)}`);
+  if (quote.handlingHours) parts.push(`出库 ${formatEta(quote.handlingHours / 24)}`);
+  if (quote.receivingHours) parts.push(`收货 ${formatEta(quote.receivingHours / 24)}`);
+  if (quote.volatilityHours) parts.push(`缓冲 ${formatEta(quote.volatilityHours / 24)}`);
+  return parts.length ? `${formatEta(quote.etaDays)}（${parts.join(" · ")}）` : formatEta(quote.etaDays);
 }
 
 function getInTransitOutboundQuantity(record, sourceCode) {
@@ -499,20 +595,63 @@ function getArrivalRisk(record, inventoryPosition, demandOverride = record.targe
   };
 }
 
-function getSourceProtection(source, record) {
+function getOperatingSnapshotEntry(sku, storeCode) {
+  return state.operatingSnapshot.records.get(`${skuKey(sku)}::${String(storeCode).trim().toUpperCase()}`);
+}
+
+function getSourceDemandProfile(source, record, productParameters) {
   const staticSafety = Math.max(0, Number(source.safety) || 0);
   const sourceConstraint = getStoreConstraint(source.code);
   const sourceDemandRecord = record
     ? transferSeed.find((item) => skuKey(item.sku) === skuKey(record.sku) && item.target.code === source.code)
     : null;
-  const dailyDemand = Math.max(0, Number(sourceDemandRecord?.target.dailyDemand) || staticSafety / 7);
-  const demandProtection = Math.ceil(dailyDemand * state.settings.sourceProtectionDays);
+  const snapshotEntry = record ? getOperatingSnapshotEntry(record.sku, source.code) : null;
+  const demandValues = [snapshotEntry?.dailyDemand, source.dailyDemand, sourceDemandRecord?.target.dailyDemand]
+    .map(Number)
+    .filter((value) => Number.isFinite(value) && value >= 0);
+  const dailyDemand = demandValues[0] ?? staticSafety / 7;
+  const multiplierValues = [snapshotEntry?.demandMultiplier, source.demandMultiplier, sourceDemandRecord?.target.demandMultiplier]
+    .map(Number)
+    .filter((value) => Number.isFinite(value) && value > 0);
+  const demandMultiplier = multiplierValues[0] ?? 1;
+  const forecastDailyDemand = dailyDemand * demandMultiplier;
+  const sourceProductParameters = productParameters || (record ? getProductParameters(record) : {
+    grossMargin: state.settings.grossMargin,
+    lifecycle: "未维护"
+  });
+  const sourceProtectionDays = state.settings.sourceProtectionDays * (isStrategicStore(source.code) ? 1.5 : 1);
+  const demandProtection = Math.ceil(forecastDailyDemand * sourceProtectionDays);
   const protectionStock = Math.max(staticSafety, sourceConstraint.minDisplay, demandProtection);
+  const sourcePriorityMultiplier = getStorePriorityMultiplier(source.code);
+  const lifecycleCoverageDays = getLifecycleCoverageDays(sourceProductParameters.lifecycle);
+  const demandBufferDays = getDemandBufferDays(sourceProductParameters.lifecycle);
+  const desiredTargetStock = Math.ceil(forecastDailyDemand * (lifecycleCoverageDays + demandBufferDays) * sourcePriorityMultiplier);
+  const maxCapacity = Number.isFinite(sourceConstraint.maxCapacity) ? sourceConstraint.maxCapacity : Number.POSITIVE_INFINITY;
+  const targetStock = Math.max(protectionStock, Math.min(Math.max(desiredTargetStock, sourceConstraint.minDisplay), maxCapacity));
+  const sourceBasis = sourceDemandRecord || record;
+  const unitContribution = sourceBasis
+    ? sourceBasis.price * sourceBasis.captureRate * (sourceProductParameters.grossMargin / 100)
+    : null;
   return {
     staticSafety,
     dailyDemand,
+    demandMultiplier,
+    forecastDailyDemand,
+    sourceProtectionDays,
     protectionStock,
-    isDynamic: protectionStock > staticSafety
+    targetStock,
+    sourcePriorityMultiplier,
+    unitContribution,
+    hasObservedDemand: demandValues.length > 0,
+    isStrategicSource: isStrategicStore(source.code)
+  };
+}
+
+function getSourceProtection(source, record, productParameters) {
+  const profile = getSourceDemandProfile(source, record, productParameters);
+  return {
+    ...profile,
+    isDynamic: profile.protectionStock > profile.staticSafety
   };
 }
 
@@ -552,7 +691,7 @@ function sourcePoolKey(record, source) {
   return `${skuKey(record.sku)}::${String(source.code).trim().toUpperCase()}`;
 }
 
-function getSourceCandidates(record) {
+function getSourceCandidates(record, productParameters) {
   const overrideIndex = state.sourceOverrides[record.id];
   const sourceEntries = Number.isInteger(overrideIndex) && record.sources[overrideIndex]
     ? [{ source: record.sources[overrideIndex], sourceIndex: overrideIndex }]
@@ -560,12 +699,14 @@ function getSourceCandidates(record) {
 
   return sourceEntries
     .filter(({ source }) => canSourceSend(source))
+    .filter(({ source }) => isCityAllowed(productParameters, source.city))
     .map(({ source, sourceIndex }) => {
       const routeQuote = getRouteQuote(source, record.target);
       return {
         source,
         sourceIndex,
         sourceConstraint: getStoreConstraint(source.code),
+        sourceDemand: getSourceDemandProfile(source, record, productParameters),
         routeQuote,
         isSameCity: source.city === record.target.city,
         poolKey: sourcePoolKey(record, source)
@@ -574,11 +715,12 @@ function getSourceCandidates(record) {
     .filter((candidate) => state.settings.allowFallbackRates || !candidate.routeQuote.isFallback)
     .sort((left, right) => left.routeQuote.parcelCost - right.routeQuote.parcelCost
       || (left.routeQuote.etaDays ?? Number.MAX_SAFE_INTEGER) - (right.routeQuote.etaDays ?? Number.MAX_SAFE_INTEGER)
+      || left.sourceDemand.forecastDailyDemand - right.sourceDemand.forecastDailyDemand
       || left.sourceIndex - right.sourceIndex);
 }
 
 function getNetworkPriority(profile) {
-  const arrivalRiskWeight = profile.arrivalRisk.hasRisk ? 2_000_000 : 0;
+  const arrivalRiskWeight = profile.hasArrivalUrgency ? 2_000_000 : 0;
   const riskWeight = profile.risk === "高" ? 1_000_000 : profile.risk === "中" ? 100_000 : 0;
   const strategicWeight = isStrategic(profile.record) ? 250_000 : 0;
   const customPriority = profile.targetConstraint.priorityAdjustment * 1_000;
@@ -593,7 +735,7 @@ function buildDemandProfile(record) {
   const demandBufferDays = getDemandBufferDays(productParameters.lifecycle);
   const demandMultiplier = Math.max(0.1, Number(record.target.demandMultiplier) || 1);
   const forecastDailyDemand = record.target.dailyDemand * demandMultiplier;
-  const priorityMultiplier = Math.max(0.1, (isStrategic(record) ? 1.15 : 1) * (1 + targetConstraint.priorityAdjustment / 100));
+  const priorityMultiplier = getStorePriorityMultiplier(record.target.code);
   const effectiveCoverageDays = (lifecycleCoverageDays + demandBufferDays) * priorityMultiplier;
   const desiredTargetStock = Math.ceil(forecastDailyDemand * effectiveCoverageDays);
   const maxCapacity = Math.max(record.target.physical, targetConstraint.maxCapacity);
@@ -602,16 +744,28 @@ function buildDemandProfile(record) {
   const arrivalRisk = getArrivalRisk(record, inventoryPosition, forecastDailyDemand);
   const regularShortage = Math.max(0, targetStock - inventoryPosition.total);
   const shortage = Math.max(regularShortage, arrivalRisk.gapQuantity);
-  const currentCoverageDays = record.target.physical / Math.max(forecastDailyDemand, 1);
-  const risk = arrivalRisk.hasRisk ? "高" : getRiskLevel(currentCoverageDays);
+  const currentCoverageDays = Math.max(0, inventoryPosition.onHand - inventoryPosition.reservedOutbound) / Math.max(forecastDailyDemand, 1);
+  const baseRisk = getRiskLevel(currentCoverageDays);
+  const arrivalDeadlineDays = arrivalRisk.hasRisk ? arrivalRisk.deadlineDays : currentCoverageDays;
+  const arrivalUrgentQuantity = arrivalRisk.hasRisk
+    ? arrivalRisk.gapQuantity
+    : (baseRisk === "高" ? shortage : 0);
+  const hasArrivalUrgency = Number.isFinite(arrivalDeadlineDays) && arrivalUrgentQuantity > 0;
+  const risk = hasArrivalUrgency ? "高" : baseRisk;
   let preHoldReason = "";
   if (record.forceHold) preHoldReason = "该商品被经营策略标记为暂不调拨。";
   if (!preHoldReason && !targetConstraint.allowInbound) preHoldReason = "调入门店当前被设置为禁止调入。";
-  const candidates = preHoldReason ? [] : getSourceCandidates(record);
+  if (!preHoldReason && !isCityAllowed(productParameters, record.target.city)) {
+    preHoldReason = `商品城市范围为 ${getCityScopeLabel(productParameters)}，不允许调入 ${record.target.city}。`;
+  }
+  const candidates = preHoldReason ? [] : getSourceCandidates(record, productParameters);
   if (!preHoldReason && !candidates.length) {
-    preHoldReason = state.settings.allowFallbackRates
-      ? "没有满足调出限制的可用来源。"
-      : "没有命中已维护运价的可用线路。";
+    const hasCityBlockedSource = record.sources.some((source) => !isCityAllowed(productParameters, source.city));
+    preHoldReason = hasCityBlockedSource
+      ? `商品城市范围为 ${getCityScopeLabel(productParameters)}，没有符合范围的可调来源。`
+      : state.settings.allowFallbackRates
+        ? "没有满足调出限制的可用来源。"
+        : "没有命中已维护运价的可用线路。";
   }
 
   const profile = {
@@ -630,6 +784,9 @@ function buildDemandProfile(record) {
     shortage,
     inventoryPosition,
     arrivalRisk,
+    arrivalDeadlineDays,
+    arrivalUrgentQuantity,
+    hasArrivalUrgency,
     currentCoverageDays,
     risk,
     unitContribution: record.price * record.captureRate * (productParameters.grossMargin / 100),
@@ -674,9 +831,47 @@ function getIncrementalRouteImpact(profile, candidate, quantity, routeLoads) {
   };
 }
 
+function getSourceOpportunityImpact(profile, candidate, pool, quantity) {
+  const sourceDemand = candidate.sourceDemand;
+  const sourceStock = Math.max(0, Number(candidate.source.stock) || 0);
+  const committedOutbound = getInTransitOutboundQuantity(profile.record, candidate.source.code);
+  const sourcePositionBefore = Math.max(0, sourceStock - committedOutbound - (pool?.allocated || 0));
+  const sourcePositionAfter = Math.max(0, sourcePositionBefore - quantity);
+  const shortageBefore = Math.max(0, sourceDemand.targetStock - sourcePositionBefore);
+  const shortageAfter = Math.max(0, sourceDemand.targetStock - sourcePositionAfter);
+  const incrementalShortage = Math.max(0, shortageAfter - shortageBefore);
+  const unitContribution = Number.isFinite(sourceDemand.unitContribution)
+    ? sourceDemand.unitContribution
+    : profile.unitContribution;
+  const opportunityCost = incrementalShortage * unitContribution * sourceDemand.sourcePriorityMultiplier;
+  const sourcePostCoverageDays = sourceDemand.forecastDailyDemand > 0
+    ? sourcePositionAfter / sourceDemand.forecastDailyDemand
+    : Number.POSITIVE_INFINITY;
+  return {
+    sourcePositionBefore,
+    sourcePositionAfter,
+    incrementalShortage,
+    opportunityCost,
+    sourcePostCoverageDays,
+    unitContribution
+  };
+}
+
+function getTimingRiskCost(profile, candidate, quantity) {
+  const etaDays = candidate.routeQuote.etaDays;
+  if (!Number.isFinite(etaDays)) {
+    return profile.hasArrivalUrgency ? Number.POSITIVE_INFINITY : profile.unitContribution * quantity * 10;
+  }
+  const deadlineDays = profile.arrivalDeadlineDays;
+  if (!Number.isFinite(deadlineDays) || etaDays <= deadlineDays) return 0;
+  const lateDays = etaDays - deadlineDays;
+  const urgencyWeight = profile.hasArrivalUrgency ? 100 : 1;
+  return lateDays * profile.forecastDailyDemand * profile.unitContribution * urgencyWeight;
+}
+
 function canArriveBeforeStockout(profile, candidate) {
-  const deadlineDays = profile.arrivalRisk.deadlineDays;
-  return !profile.arrivalRisk.hasRisk
+  const deadlineDays = profile.arrivalDeadlineDays;
+  return !profile.hasArrivalUrgency
     || (Number.isFinite(deadlineDays)
       && Number.isFinite(candidate.routeQuote.etaDays)
       && candidate.routeQuote.etaDays <= deadlineDays + 0.01);
@@ -698,41 +893,64 @@ function allocateAcrossNetwork(profiles) {
 
     while (remainingNeed > 0) {
       const onTimeQuantity = recordAllocations
-        .filter((allocation) => Number.isFinite(profile.arrivalRisk.deadlineDays) && allocation.etaDays <= profile.arrivalRisk.deadlineDays + 0.01)
+        .filter((allocation) => Number.isFinite(profile.arrivalDeadlineDays) && allocation.etaDays <= profile.arrivalDeadlineDays + 0.01)
         .reduce((sum, allocation) => sum + allocation.quantity, 0);
-      const remainingArrivalGap = Math.max(0, profile.arrivalRisk.gapQuantity - onTimeQuantity);
-      const choices = profile.candidates
+      const remainingArrivalGap = Math.max(0, profile.arrivalUrgentQuantity - onTimeQuantity);
+      const requiresOnTimeSource = profile.hasArrivalUrgency && remainingArrivalGap > 0;
+      const rawChoices = profile.candidates
         .map((candidate) => {
           const pool = pools.get(candidate.poolKey);
           const isOnTime = canArriveBeforeStockout(profile, candidate);
-          const quantityLimit = profile.arrivalRisk.hasRisk && remainingArrivalGap > 0 && isOnTime
+          const quantityLimit = requiresOnTimeSource && isOnTime
             ? remainingArrivalGap
             : remainingNeed;
           const quantity = Math.min(remainingNeed, pool?.remaining || 0, quantityLimit);
           const incrementalImpact = quantity
             ? getIncrementalRouteImpact(profile, candidate, quantity, routeLoads)
             : { packages: Number.POSITIVE_INFINITY, cost: Number.POSITIVE_INFINITY };
+          const sourceImpact = quantity
+            ? getSourceOpportunityImpact(profile, candidate, pool, quantity)
+            : { opportunityCost: Number.POSITIVE_INFINITY, sourcePostCoverageDays: 0 };
+          const timingRiskCost = quantity ? getTimingRiskCost(profile, candidate, quantity) : Number.POSITIVE_INFINITY;
+          const targetProtectedMargin = quantity * profile.unitContribution;
+          const pairContribution = targetProtectedMargin - sourceImpact.opportunityCost - incrementalImpact.cost - timingRiskCost;
           return {
             candidate,
             pool,
             quantity,
             isOnTime,
             incrementalCost: incrementalImpact.cost,
-            incrementalPackages: incrementalImpact.packages
+            incrementalPackages: incrementalImpact.packages,
+            sourceImpact,
+            timingRiskCost,
+            targetProtectedMargin,
+            pairContribution
           };
         })
-        .filter((choice) => choice.quantity > 0)
+        .filter((choice) => choice.quantity > 0);
+      const choices = rawChoices
+        .filter((choice) => profile.hasArrivalUrgency || choice.pairContribution >= 0)
         .sort((left, right) => {
-          if (profile.arrivalRisk.hasRisk && remainingArrivalGap > 0 && left.isOnTime !== right.isOnTime) {
+          if (requiresOnTimeSource && left.isOnTime !== right.isOnTime) {
             return left.isOnTime ? -1 : 1;
           }
-          return left.incrementalCost - right.incrementalCost
+          return right.pairContribution - left.pairContribution
+            || left.sourceImpact.opportunityCost - right.sourceImpact.opportunityCost
+            || left.timingRiskCost - right.timingRiskCost
+            || left.incrementalCost - right.incrementalCost
             || left.candidate.routeQuote.parcelCost - right.candidate.routeQuote.parcelCost
             || (left.candidate.routeQuote.etaDays ?? Number.MAX_SAFE_INTEGER) - (right.candidate.routeQuote.etaDays ?? Number.MAX_SAFE_INTEGER)
+            || right.sourceImpact.sourcePostCoverageDays - left.sourceImpact.sourcePostCoverageDays
+            || left.candidate.sourceDemand.forecastDailyDemand - right.candidate.sourceDemand.forecastDailyDemand
             || left.candidate.sourceIndex - right.candidate.sourceIndex;
         });
 
-      if (!choices.length) break;
+      if (!choices.length) {
+        profile.economicBlocked = !profile.hasArrivalUrgency
+          && rawChoices.length > 0
+          && rawChoices.every((choice) => choice.pairContribution < 0);
+        break;
+      }
       const selected = choices[0];
       const routeLoadKey = routeKey(selected.candidate.source.code, profile.record.target.code);
       const packageEquivalent = selected.quantity / profile.productParameters.parcelCapacity;
@@ -741,6 +959,7 @@ function allocateAcrossNetwork(profiles) {
       routeLoads.set(routeLoadKey, (routeLoads.get(routeLoadKey) || 0) + packageEquivalent);
       recordAllocations.push({
         source: selected.candidate.source,
+        recordSku: profile.record.sku,
         sourceConstraint: selected.candidate.sourceConstraint,
         sourceAvailable: selected.pool.initialAvailable,
         sourceRemaining: selected.pool.remaining,
@@ -750,8 +969,20 @@ function allocateAcrossNetwork(profiles) {
         packageEquivalent,
         incrementalPackageCount: selected.incrementalPackages,
         incrementalLogisticsCost: selected.incrementalCost,
+        sourceOpportunityCost: selected.sourceImpact.opportunityCost,
+        sourceIncrementalShortage: selected.sourceImpact.incrementalShortage,
+        sourcePositionAfter: selected.sourceImpact.sourcePositionAfter,
+        sourcePostCoverageDays: selected.sourceImpact.sourcePostCoverageDays,
+        sourceForecastDailyDemand: selected.candidate.sourceDemand.forecastDailyDemand,
+        sourceDemandObserved: selected.candidate.sourceDemand.hasObservedDemand,
+        sourceIsStrategic: selected.candidate.sourceDemand.isStrategicSource,
+        timingRiskCost: selected.timingRiskCost,
+        pairContribution: selected.pairContribution,
         parcelCost: selected.candidate.routeQuote.parcelCost,
         etaDays: selected.candidate.routeQuote.etaDays,
+        etaHours: selected.candidate.routeQuote.etaHours,
+        cutoffWaitHours: selected.candidate.routeQuote.cutoffWaitHours,
+        hasTimeBreakdown: selected.candidate.routeQuote.hasTimeBreakdown,
         rateSource: selected.candidate.routeQuote.rateSource,
         usingFallbackRate: selected.candidate.routeQuote.isFallback,
         isSameCity: selected.candidate.isSameCity
@@ -766,6 +997,10 @@ function allocateAcrossNetwork(profiles) {
       const pool = pools.get(allocation.poolKey);
       allocation.sourceRemaining = pool?.remaining ?? allocation.sourceRemaining;
       allocation.sourceAllocated = pool?.allocated ?? allocation.sourceAllocated;
+      const sourcePostPosition = Math.max(0, Number(allocation.source.stock) - getInTransitOutboundQuantity({ sku: allocation.recordSku }, allocation.source.code) - (pool?.allocated || 0));
+      allocation.sourcePostCoverageDays = allocation.sourceForecastDailyDemand > 0
+        ? sourcePostPosition / allocation.sourceForecastDailyDemand
+        : Number.POSITIVE_INFINITY;
     });
   });
 
@@ -794,7 +1029,8 @@ function applyGroupedEconomics(records) {
     group.totalPackages = group.totalPackageEquivalent ? Math.ceil(group.totalPackageEquivalent) : 0;
     group.totalCost = group.totalPackages * group.parcelCost;
     group.totalSalesMargin = group.legs.reduce((sum, leg) => sum + leg.allocation.quantity * leg.record.price * leg.record.captureRate * (leg.record.productMargin / 100), 0);
-    group.totalContribution = group.totalSalesMargin - group.totalCost;
+    group.totalSourceOpportunityCost = group.legs.reduce((sum, leg) => sum + leg.allocation.sourceOpportunityCost, 0);
+    group.totalContribution = group.totalSalesMargin - group.totalCost - group.totalSourceOpportunityCost;
     group.isEconomic = group.totalContribution >= state.settings.minimumNetContribution;
     group.legs.forEach(({ record, allocation }) => {
       const costShare = group.totalPackageEquivalent
@@ -803,7 +1039,7 @@ function applyGroupedEconomics(records) {
       allocation.sharedLogisticsCost = costShare;
       allocation.logisticsCost = allocation.incrementalLogisticsCost;
       allocation.salesProtected = allocation.quantity * record.price * record.captureRate;
-      allocation.contribution = allocation.salesProtected * (record.productMargin / 100) - allocation.logisticsCost;
+      allocation.contribution = allocation.salesProtected * (record.productMargin / 100) - allocation.sourceOpportunityCost - allocation.logisticsCost;
     });
   });
 
@@ -812,11 +1048,13 @@ function applyGroupedEconomics(records) {
     record.packageCount = record.packageEquivalent ? Math.ceil(record.packageEquivalent) : 0;
     record.sharedLogisticsCost = record.allocations.reduce((sum, allocation) => sum + allocation.sharedLogisticsCost, 0);
     record.logisticsCost = record.allocations.reduce((sum, allocation) => sum + allocation.logisticsCost, 0);
+    record.sourceOpportunityCost = record.allocations.reduce((sum, allocation) => sum + allocation.sourceOpportunityCost, 0);
     record.salesProtected = record.allocations.reduce((sum, allocation) => sum + allocation.salesProtected, 0);
     record.contribution = record.allocations.reduce((sum, allocation) => sum + allocation.contribution, 0);
     record.hasEconomicRoute = record.contribution >= state.settings.minimumNetContribution;
     if (record.allocations.length) {
-      record.etaDays = Math.max(...record.allocations.map((allocation) => allocation.etaDays ?? 0));
+      const etaValues = record.allocations.map((allocation) => allocation.etaDays).filter(Number.isFinite);
+      record.etaDays = etaValues.length ? Math.max(...etaValues) : null;
       record.usingFallbackRate = record.allocations.some((allocation) => allocation.usingFallbackRate);
       record.rateSource = record.usingFallbackRate
         ? (record.allocations.every((allocation) => allocation.usingFallbackRate) ? "演示试算价" : "混合运价试算")
@@ -834,12 +1072,12 @@ function getCalculatedRecords() {
   const records = profiles.map((profile) => {
     const recordAllocations = allocations.get(profile.record.id) || [];
     const allocatedQuantity = recordAllocations.reduce((sum, allocation) => sum + allocation.quantity, 0);
-    const onTimeQuantity = profile.arrivalRisk.hasRisk && Number.isFinite(profile.arrivalRisk.deadlineDays)
+    const onTimeQuantity = profile.hasArrivalUrgency && Number.isFinite(profile.arrivalDeadlineDays)
       ? recordAllocations
-        .filter((allocation) => Number.isFinite(allocation.etaDays) && allocation.etaDays <= profile.arrivalRisk.deadlineDays + 0.01)
+        .filter((allocation) => Number.isFinite(allocation.etaDays) && allocation.etaDays <= profile.arrivalDeadlineDays + 0.01)
         .reduce((sum, allocation) => sum + allocation.quantity, 0)
       : 0;
-    const arrivalGapRemaining = Math.max(0, profile.arrivalRisk.gapQuantity - onTimeQuantity);
+    const arrivalGapRemaining = Math.max(0, profile.arrivalUrgentQuantity - onTimeQuantity);
     const primaryAllocation = recordAllocations[0];
     const fallbackCandidate = profile.candidates[0];
     const source = primaryAllocation?.source || fallbackCandidate?.source || profile.record.sources[0];
@@ -856,6 +1094,9 @@ function getCalculatedRecords() {
       demandMultiplier: profile.demandMultiplier,
       forecastDailyDemand: profile.forecastDailyDemand,
       targetConstraint: profile.targetConstraint,
+      productCityScope: getCityScopeLabel(profile.productParameters),
+      hasCityRestriction: Boolean(profile.productParameters.allowedCities?.length),
+      candidates: profile.candidates,
       sourceConstraint,
       sourceAvailable: primaryAllocation?.sourceAvailable ?? sourcePool?.initialAvailable ?? getSourceSafeAvailable(source, profile.record),
       sourceRemaining: primaryAllocation?.sourceRemaining ?? sourcePool?.remaining ?? getSourceSafeAvailable(source, profile.record),
@@ -865,10 +1106,10 @@ function getCalculatedRecords() {
       confirmedInbound: profile.inventoryPosition.confirmedInbound,
       confirmedInboundLater: profile.inventoryPosition.confirmedInboundLater,
       reservedOutbound: profile.inventoryPosition.reservedOutbound,
-      arrivalRisk: profile.arrivalRisk.hasRisk,
-      arrivalGapQuantity: profile.arrivalRisk.gapQuantity,
+      arrivalRisk: profile.hasArrivalUrgency,
+      arrivalGapQuantity: profile.arrivalUrgentQuantity,
       arrivalGapRemaining,
-      arrivalDeadlineDays: profile.arrivalRisk.deadlineDays,
+      arrivalDeadlineDays: profile.arrivalDeadlineDays,
       stockoutDays: profile.arrivalRisk.stockoutDays,
       firstInboundEtaDays: profile.arrivalRisk.firstInboundEtaDays,
       quantity: allocatedQuantity,
@@ -880,10 +1121,15 @@ function getCalculatedRecords() {
       productLifecycle: profile.productParameters.lifecycle,
       usingImportedProductParameters: profile.productParameters.isImported,
       etaDays: primaryAllocation?.etaDays ?? fallbackCandidate?.routeQuote.etaDays ?? null,
+      etaHours: primaryAllocation?.etaHours ?? fallbackCandidate?.routeQuote.etaHours ?? null,
+      hasTimeBreakdown: recordAllocations.some((allocation) => allocation.hasTimeBreakdown)
+        || fallbackCandidate?.routeQuote.hasTimeBreakdown
+        || false,
       rateSource: primaryAllocation?.rateSource ?? fallbackCandidate?.routeQuote.rateSource ?? "待维护",
       usingFallbackRate: primaryAllocation?.usingFallbackRate ?? fallbackCandidate?.routeQuote.isFallback ?? true,
       logisticsCost: 0,
       sharedLogisticsCost: 0,
+      sourceOpportunityCost: 0,
       salesProtected: 0,
       contribution: 0,
       packageEquivalent: 0,
@@ -892,6 +1138,7 @@ function getCalculatedRecords() {
       currentCoverageDays: profile.currentCoverageDays,
       priorityMultiplier: profile.priorityMultiplier,
       preHoldReason: profile.preHoldReason,
+      economicBlocked: Boolean(profile.economicBlocked),
       hasUnconfirmedInbound: profile.inventoryPosition.unconfirmedInbound > 0,
       isSameCity: primaryAllocation?.isSameCity ?? fallbackCandidate?.isSameCity ?? false
     };
@@ -901,7 +1148,11 @@ function getCalculatedRecords() {
   records.forEach((record) => {
     let holdReason = record.preHoldReason;
     const hasUncoveredArrivalGap = record.arrivalRisk && record.arrivalGapRemaining > 0;
-    if (!holdReason && record.shortage > 0 && !record.quantity && !hasUncoveredArrivalGap) holdReason = "全网同 SKU 的可调余量不足，无法在不突破来源安全库存的前提下补货。";
+    if (!holdReason && record.shortage > 0 && !record.quantity && !hasUncoveredArrivalGap) {
+      holdReason = record.economicBlocked
+        ? "可调来源会造成更高的来源销售损失或物流成本，本轮不建议占用货源。"
+        : "全网同 SKU 的可调余量不足，无法在不突破来源安全库存的前提下补货。";
+    }
     if (!holdReason && record.shortage > 0 && record.quantity < state.settings.minimumTransferQuantity && record.risk !== "高") {
       holdReason = `建议量低于 ${formatNumber(state.settings.minimumTransferQuantity)} 件，且未达到紧急缺货风险，等待后续合单窗口。`;
     }
@@ -915,6 +1166,7 @@ function getCalculatedRecords() {
     record.decision = isHold ? "暂不建议" : hasUncoveredArrivalGap ? "到货预警" : existingStatus || "待审核";
     record.requiresEscalation = !isHold && (isStrategic(record)
       || record.arrivalRisk
+      || record.allocations.some((allocation) => allocation.sourceIsStrategic)
       || record.allocations.some((allocation) => !allocation.isSameCity)
       || record.contribution >= state.settings.approvalThreshold
       || record.allocationGap > 0
@@ -1357,29 +1609,51 @@ function renderDetail(records) {
   const currentPercent = Math.min(100, Math.round((record.target.physical / Math.max(record.targetStock, 1)) * 100));
   const inboundPercent = Math.max(0, Math.min(100 - currentPercent, Math.round((record.confirmedInbound / Math.max(record.targetStock, 1)) * 100)));
   const needPercent = Math.max(0, 100 - currentPercent - inboundPercent);
+  const productParameters = getProductParameters(record);
   const sources = record.sources.map((source) => {
     const allocations = record.allocations.filter((allocation) => allocation.source.code === source.code);
     const allocatedQuantity = allocations.reduce((sum, allocation) => sum + allocation.quantity, 0);
     const incrementalPackages = allocations.reduce((sum, allocation) => sum + allocation.incrementalPackageCount, 0);
     const incrementalCost = allocations.reduce((sum, allocation) => sum + allocation.incrementalLogisticsCost, 0);
+    const sourceOpportunityCost = allocations.reduce((sum, allocation) => sum + allocation.sourceOpportunityCost, 0);
     const route = source.city === record.target.city ? "同城" : "跨城";
     const quote = getRouteQuote(source, record.target);
     const constraint = getStoreConstraint(source.code);
-    const protection = getSourceProtection(source, record);
+    const cityAllowed = isCityAllowed(productParameters, source.city);
+    const candidate = record.candidates.find((item) => item.source.code === source.code);
+    const sourceDemand = candidate?.sourceDemand || getSourceDemandProfile(source, record, productParameters);
+    const protection = getSourceProtection(source, record, productParameters);
     const available = constraint.allowOutbound ? getSourceSafeAvailable(source, record) : 0;
     const sourceRemaining = allocations[0]?.sourceRemaining ?? available;
-    return `<div class="source-row">
+    const postCoverageDays = allocations[0]?.sourcePostCoverageDays ?? (sourceDemand.forecastDailyDemand > 0
+      ? Math.max(0, Number(source.stock) || 0) / sourceDemand.forecastDailyDemand
+      : Number.POSITIVE_INFINITY);
+    const sourceDecision = !cityAllowed
+      ? "城市范围禁止"
+      : !constraint.allowOutbound
+        ? "禁止调出"
+        : allocatedQuantity
+          ? `本轮分配 ${formatNumber(allocatedQuantity)} 件 · 新增 ${formatNumber(incrementalPackages)} 包 / ${formatMoney(incrementalCost)}`
+          : "备选来源";
+    const sourceMeta = !cityAllowed
+      ? `商品仅允许在 ${record.productCityScope} 销售`
+      : `预测日销 ${sourceDemand.forecastDailyDemand.toFixed(1)} 件 · 调后覆盖 ${formatCoverageDays(postCoverageDays)}${sourceDemand.hasObservedDemand ? "" : "（按保护库存估算）"}`;
+    return `<div class="source-row${cityAllowed && constraint.allowOutbound ? "" : " is-blocked"}">
       <div>
         <strong>${escapeHtml(source.name)}</strong>
-        <span>实物 ${formatNumber(source.stock)} · 保护库存 ${formatNumber(protection.protectionStock)}${protection.isDynamic ? "（动态）" : ""} · ${route} · ETA ${formatEta(quote.etaDays)} · ${formatMoney(quote.parcelCost)}/包 ${quote.isFallback ? "试算" : "运价表"}</span>
+        <span>实物 ${formatNumber(source.stock)} · 保护库存 ${formatNumber(protection.protectionStock)}${protection.isDynamic ? "（动态）" : ""} · ${route} · ETA ${formatRouteTiming(quote)} · ${formatMoney(quote.parcelCost)}/包 ${quote.isFallback ? "试算" : "运价表"}</span>
+        <span>${escapeHtml(sourceMeta)}</span>
       </div>
-      <div class="source-right">${allocatedQuantity ? `本轮分配 ${formatNumber(allocatedQuantity)} 件 · 新增 ${formatNumber(incrementalPackages)} 包 / ${formatMoney(incrementalCost)}` : "备选来源"}<br>${constraint.allowOutbound ? `全网余 ${formatNumber(sourceRemaining)}` : "禁止调出"}</div>
+      <div class="source-right">${sourceDecision}<br>${cityAllowed && constraint.allowOutbound ? `来源机会成本 ${formatMoney(sourceOpportunityCost)} · 全网余 ${formatNumber(sourceRemaining)}` : "不占用来源库存"}</div>
     </div>`;
   }).join("");
 
   const arrivalCoverageQuantity = Math.max(0, record.arrivalGapQuantity - record.arrivalGapRemaining);
+  const inboundTiming = Number.isFinite(record.firstInboundEtaDays)
+    ? `已确认在途最早 ${formatEta(record.firstInboundEtaDays)} 到货`
+    : "当前没有可抵减风险的确认在途";
   const arrivalRiskNote = record.arrivalRisk
-    ? `到货可达性预警：预计第 ${record.arrivalDeadlineDays.toFixed(1)} 天出现断货，已确认在途最早 ${formatEta(record.firstInboundEtaDays)} 到货；到货前服务缺口约 ${formatNumber(record.arrivalGapQuantity)} 件。${record.arrivalGapRemaining > 0 ? `可在断货前抵达的调拨仅覆盖 ${formatNumber(arrivalCoverageQuantity)} 件，仍有 ${formatNumber(record.arrivalGapRemaining)} 件需加急处理。` : `本轮已优先安排 ${formatNumber(arrivalCoverageQuantity)} 件可在断货前抵达的货。`}`
+    ? `到货可达性预警：预计第 ${record.arrivalDeadlineDays.toFixed(1)} 天出现断货，${inboundTiming}；到货前服务缺口约 ${formatNumber(record.arrivalGapQuantity)} 件。${record.arrivalGapRemaining > 0 ? `可在断货前抵达的调拨仅覆盖 ${formatNumber(arrivalCoverageQuantity)} 件，仍有 ${formatNumber(record.arrivalGapRemaining)} 件需加急处理。` : `本轮已优先安排 ${formatNumber(arrivalCoverageQuantity)} 件可在断货前抵达的货。`}`
     : "";
   const sourceReason = record.arrivalRisk && record.arrivalGapRemaining > 0
     ? `可在第 ${record.arrivalDeadlineDays.toFixed(1)} 天前到货的来源不足，需人工加急、改走更快线路或接受断货风险。`
@@ -1395,9 +1669,12 @@ function renderDetail(records) {
       ? `全网可调余量不足，本轮先覆盖 ${formatNumber(record.quantity)} 件，仍有 ${formatNumber(record.allocationGap)} 件缺口进入下一轮补货或调拨。`
       : record.allocations.length > 1
         ? `同一 SKU 的共享余量已统一扣减，本笔由 ${formatNumber(record.allocations.length)} 个来源分段补足，避免任一来源跌破动态保护库存。`
-      : record.isSameCity
+    : record.isSameCity
           ? "同城来源在不跌破动态保护库存前提下可足额覆盖需求。"
-          : "已在满足来源动态保护库存后，按线路时效、成本和全网余量选择跨城来源。";
+          : "已在满足来源动态保护库存后，按来源机会成本、线路时效、合单成本和全网余量选择跨城来源。";
+  const sourceSelectionReason = record.allocations.length
+    ? `候选来源先通过商品城市范围与来源保护校验，再比较调后覆盖、来源销售损失、时效和合单增量成本；本笔预计来源机会成本 ${formatMoney(record.sourceOpportunityCost)}。`
+    : `商品城市范围为 ${record.productCityScope}；不符合城市范围、来源保护或时效要求的门店不会占用库存。`;
   const rateLabel = record.usingFallbackRate ? "演示运价试算" : "上传运价表";
   const financialReason = record.decision === "在途"
     ? "本笔已发货并进入库存位置，本轮不重复计入调拨收益与物流成本。"
@@ -1407,7 +1684,7 @@ function renderDetail(records) {
       ? "常规调拨收益已按合单试算；到货前的服务缺口须走加急审批，不能只按常规物流成本判断。"
     : record.decision === "暂不建议"
     ? record.holdReason
-    : `按 ${record.productMargin}% ${record.usingImportedProductParameters ? "商品毛利率" : "试点毛利率"}与本笔新增的 ${formatMoney(record.logisticsCost)} ${rateLabel}，调拨仍有正向贡献。`;
+    : `按 ${record.productMargin}% ${record.usingImportedProductParameters ? "商品毛利率" : "试点毛利率"}、${formatMoney(record.sourceOpportunityCost)} 来源机会成本与 ${formatMoney(record.logisticsCost)} ${rateLabel}计算，调拨仍有正向贡献。`;
   const routeLabel = record.allocations.length > 1 ? "多来源补足" : record.isSameCity ? "同城直调" : "跨城直调";
   const transferLegs = getTransferLegs(record);
   const transferSourceMarkup = transferLegs.map((allocation) => {
@@ -1419,6 +1696,9 @@ function renderDetail(records) {
   const targetStockReason = record.targetConstraint.allowInbound
     ? `目标库存按 ${record.lifecycleCoverageDays} 天基础覆盖 + ${record.demandBufferDays} 天动销波动缓冲计算${record.demandMultiplier !== 1 ? `，并采用 ${record.demandMultiplier.toFixed(2)} 倍活动期预测日销` : ""}${record.priorityMultiplier !== 1 ? `，再叠加 ${record.priorityMultiplier.toFixed(2)} 倍门店优先级` : ""}${Number.isFinite(record.targetConstraint.maxCapacity) ? `；库容上限为 ${formatNumber(record.targetConstraint.maxCapacity)} 件` : ""}。`
     : "该门店当前被设置为禁止调入，本轮不生成调拨。";
+  const demandBasis = record.target.inStockDays && record.target.inStockDays !== 28
+    ? `近 28 天销量按 ${formatNumber(record.target.inStockDays)} 个有货天数折算`
+    : "近 28 天销量按 28 天折算";
 
   panel.innerHTML = `
     <div class="panel-header">
@@ -1484,6 +1764,7 @@ function renderDetail(records) {
         <div class="impact-list">
           <div><span>预计增量贡献</span><strong>${formatMoney(record.contribution)}</strong></div>
           <div><span>预计守住销售额</span><strong>${formatMoney(record.salesProtected)}</strong></div>
+          <div><span>来源机会成本</span><strong>${formatMoney(record.sourceOpportunityCost)}</strong></div>
           <div><span>本笔新增物流</span><strong>${formatMoney(record.logisticsCost)}</strong></div>
           <div><span>预计时效</span><strong>${formatEta(record.etaDays)}</strong></div>
           <div><span>成本依据</span><strong>${record.rateSource}</strong></div>
@@ -1496,15 +1777,17 @@ function renderDetail(records) {
       <div class="detail-section">
         <h4>推荐依据</h4>
         <ul class="reason-list">
-          <li>近 28 天日均动销 ${record.target.dailyDemand.toFixed(1)} 件${record.demandMultiplier !== 1 ? `，活动期预测日销 ${record.forecastDailyDemand.toFixed(1)} 件` : ""}；当前实物按预测日销仅覆盖 ${record.currentCoverageDays.toFixed(1)} 天，低于 ${state.settings.urgentCoverageDays} 天即进入高风险优先队列。</li>
+          <li>${demandBasis}：日均动销 ${record.target.dailyDemand.toFixed(1)} 件${record.demandMultiplier !== 1 ? `，活动期预测日销 ${record.forecastDailyDemand.toFixed(1)} 件` : ""}；当前实物按预测日销仅覆盖 ${record.currentCoverageDays.toFixed(1)} 天，低于 ${state.settings.urgentCoverageDays} 天即进入高风险优先队列。</li>
           <li>${targetStockReason}</li>
           <li>${record.confirmedInbound ? `保护期 ${record.lifecycleCoverageDays} 天内有 ${formatNumber(record.confirmedInbound)} 件已确认在途，已计入库存位置。` : "保护期内没有可抵减缺货风险的已确认在途库存。"}${record.confirmedInboundLater ? `另有 ${formatNumber(record.confirmedInboundLater)} 件到货较晚，本轮不抵减。` : ""}${record.hasUnconfirmedInbound ? `另有 ${formatNumber(record.target.inbound)} 件在途未携带到货承诺，仍按不可用处理。` : ""}</li>
           ${arrivalRiskNote ? `<li class="arrival-risk-note">${arrivalRiskNote}</li>` : ""}
           <li>${sourceReason}</li>
+          <li>${sourceSelectionReason}</li>
+          <li>${record.hasCityRestriction ? `该商品限定在 ${record.productCityScope} 销售，范围外门店已被硬性排除。` : "该商品未维护城市限定范围，当前不限制跨城市候选；正式运行可通过商品参数上传维护。"}</li>
           <li>商品生命周期：${escapeHtml(record.productLifecycle)}；${record.usingImportedProductParameters ? "毛利与装箱容量已按上传商品参数计算。" : "未上传商品参数，当前采用试点毛利与统一单包容量。"}</li>
           <li>${financialReason}</li>
-          <li>${record.usingFallbackRate ? "本路线尚未覆盖上传运价表，当前使用 Demo 试算价，不能作为实际成本决策。" : "本路线已命中上传运价表；装箱容量、附加费与实际结算仍应在正式接入时校验。"}</li>
-          <li>${record.requiresEscalation ? "战略门店、跨城、分来源或残余缺口已触发升级审批。" : "本笔为常规风险，可由运营常规审核。"}</li>
+          <li>${record.usingFallbackRate ? "本路线尚未覆盖上传运价表，当前使用 Demo 试算价，不能作为实际成本决策。" : `${record.hasTimeBreakdown ? "本路线 ETA 已计入截单、出库、收货或时效缓冲；" : "本路线已命中上传运价表；"}装箱容量、附加费与实际结算仍应在正式接入时校验。`}</li>
+          <li>${record.requiresEscalation ? "战略门店、战略来源、跨城、分来源或残余缺口已触发升级审批。" : "本笔为常规风险，可由运营常规审核。"}</li>
         </ul>
       </div>
 
@@ -1673,7 +1956,7 @@ function renderRateCardStatus() {
     return;
   }
   const skipped = state.rateCard.skippedRows ? `；已忽略 ${state.rateCard.skippedRows} 行不完整数据` : "";
-  status.textContent = `已在本机读取 ${state.rateCard.fileName}：${formatNumber(routeCount)} 条有效线路参与计算；未覆盖线路仍采用演示试算价${skipped}。`;
+  status.textContent = `已在本机读取 ${state.rateCard.fileName}：${formatNumber(routeCount)} 条有效线路参与计算；可维护 ETA、截单、出库、收货与时效缓冲，未覆盖线路仍采用演示试算价${skipped}。`;
   status.classList.add("is-loaded");
 }
 
@@ -1706,7 +1989,7 @@ function renderProductParametersStatus() {
     return;
   }
   const skipped = state.productParameters.skippedRows ? `；已忽略 ${state.productParameters.skippedRows} 行不完整数据` : "";
-  status.textContent = `已在本机读取 ${state.productParameters.fileName}：${formatNumber(recordCount)} 个商品参与毛利或装箱计算${skipped}。`;
+  status.textContent = `已在本机读取 ${state.productParameters.fileName}：${formatNumber(recordCount)} 个商品参与毛利、装箱或城市范围计算${skipped}。`;
   status.classList.add("is-loaded");
 }
 
@@ -1791,6 +2074,17 @@ function parseOptionalUploadNumber(value) {
   return String(value ?? "").trim() ? parseUploadNumber(value) : null;
 }
 
+function parseOptionalClockHour(value) {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) return null;
+  const matched = normalized.match(/^(\d{1,2})(?::(\d{1,2}))?$/);
+  if (!matched) return Number.NaN;
+  const hour = Number(matched[1]);
+  const minute = matched[2] === undefined ? 0 : Number(matched[2]);
+  if (!Number.isInteger(hour) || !Number.isInteger(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) return Number.NaN;
+  return hour + minute / 60;
+}
+
 async function readTabularRows(file) {
   const name = file.name.toLowerCase();
   if (name.endsWith(".csv")) return parseCsvRows(await file.text());
@@ -1814,11 +2108,20 @@ function parseRateCard(rows) {
     const parcelCost = parseUploadNumber(getUploadValue(row, ["单包成本", "每包成本", "运费", "物流成本", "成本", "parcel_cost", "cost"]));
     const etaValue = getUploadValue(row, ["预计时效（天）", "预计时效天", "时效（天）", "时效天", "eta_days", "eta", "lead_time"]);
     const etaDays = String(etaValue).trim() ? parseUploadNumber(etaValue) : null;
-    if (!sourceCode || !targetCode || !Number.isFinite(parcelCost) || parcelCost < 0 || (etaDays !== null && (!Number.isFinite(etaDays) || etaDays < 0))) {
+    const etaHours = parseOptionalUploadNumber(getUploadValue(row, ["预计时效（小时）", "预计时效小时", "运输时长（小时）", "运输时长", "时效（小时）", "eta_hours", "transit_hours"]));
+    const handlingHours = parseOptionalUploadNumber(getUploadValue(row, ["出库揽收时长（小时）", "出库时长（小时）", "揽收时长（小时）", "handling_hours", "pickup_hours"]));
+    const receivingHours = parseOptionalUploadNumber(getUploadValue(row, ["收货上架时长（小时）", "收货时长（小时）", "receiving_hours", "putaway_hours"]));
+    const cutoffHour = parseOptionalClockHour(getUploadValue(row, ["截单时间", "发运截单时间", "cutoff_time", "cutoff"]));
+    const cutoffDelayHours = parseOptionalUploadNumber(getUploadValue(row, ["截单后顺延小时", "截单顺延（小时）", "cutoff_delay_hours"]));
+    const volatilityHours = parseOptionalUploadNumber(getUploadValue(row, ["时效波动缓冲（小时）", "时效缓冲（小时）", "路况缓冲（小时）", "volatility_hours", "buffer_hours"]));
+    const routeNumbers = [etaDays, etaHours, handlingHours, receivingHours, cutoffDelayHours, volatilityHours];
+    if (!sourceCode || !targetCode || !Number.isFinite(parcelCost) || parcelCost < 0
+      || routeNumbers.some((value) => value !== null && (!Number.isFinite(value) || value < 0))
+      || (cutoffHour !== null && (!Number.isFinite(cutoffHour) || cutoffHour < 0 || cutoffHour >= 24))) {
       skippedRows += 1;
       return;
     }
-    routes.set(routeKey(sourceCode, targetCode), { parcelCost, etaDays });
+    routes.set(routeKey(sourceCode, targetCode), { parcelCost, etaDays, etaHours, handlingHours, receivingHours, cutoffHour, cutoffDelayHours, volatilityHours });
   });
   if (!routes.size) {
     throw new Error("没有识别到有效线路。请检查必填字段：来源门店编码、目的门店编码、单包成本。");
@@ -1834,17 +2137,19 @@ function parseProductParameters(rows) {
     const grossMarginValue = getUploadValue(row, ["毛利率", "实际毛利率", "gross_margin", "grossmargin"]);
     const parcelCapacityValue = getUploadValue(row, ["单包容量", "每包件数", "装箱件数", "包装容量", "parcel_capacity", "pack_capacity"]);
     const lifecycle = String(getUploadValue(row, ["商品生命周期", "生命周期", "商品状态", "life_cycle", "lifecycle"]) || "").trim();
+    const cityScopeValue = getUploadValue(row, ["可售城市", "允许销售城市", "城市范围", "城市限定", "allowed_cities", "city_scope"]);
     const grossMargin = String(grossMarginValue).trim() ? parseUploadNumber(grossMarginValue) : null;
     const parcelCapacity = String(parcelCapacityValue).trim() ? parseUploadNumber(parcelCapacityValue) : null;
+    const allowedCities = parseCityScope(cityScopeValue);
     const isInvalid = !sku
       || (grossMargin !== null && (!Number.isFinite(grossMargin) || grossMargin < 0 || grossMargin > 100))
       || (parcelCapacity !== null && (!Number.isFinite(parcelCapacity) || parcelCapacity <= 0))
-      || (grossMargin === null && parcelCapacity === null && !lifecycle);
+      || (grossMargin === null && parcelCapacity === null && !lifecycle && allowedCities === null);
     if (isInvalid) {
       skippedRows += 1;
       return;
     }
-    records.set(skuKey(sku), { grossMargin, parcelCapacity, lifecycle });
+    records.set(skuKey(sku), { grossMargin, parcelCapacity, lifecycle, allowedCities });
   });
   if (!records.size) {
     throw new Error("没有识别到有效商品参数。请检查货号及毛利率、单包容量或生命周期字段。");
@@ -1902,17 +2207,19 @@ function parseOperatingSnapshot(rows) {
     const storeCode = String(getUploadValue(row, ["门店编码", "仓店编码", "门店代码", "store", "store_code", "shop_code"]) || "").trim();
     const physical = parseOptionalUploadNumber(getUploadValue(row, ["当前实物", "实物库存", "现存库存", "当前库存", "physical", "on_hand", "stock"]));
     const sales28 = parseOptionalUploadNumber(getUploadValue(row, ["近28天销量", "28天销量", "近四周销量", "sales_28d", "sales28"]));
+    const inStockDays = parseOptionalUploadNumber(getUploadValue(row, ["有货天数", "可售天数", "在售天数", "有库存天数", "in_stock_days", "available_days"]));
     const dailyDemandInput = parseOptionalUploadNumber(getUploadValue(row, ["日均动销", "日均销量", "日销", "daily_demand", "daily_sales"]));
     const demandMultiplier = parseOptionalUploadNumber(getUploadValue(row, ["活动系数", "节假日系数", "预测动销系数", "demand_multiplier", "seasonal_multiplier"]));
     const confirmedInbound = parseOptionalUploadNumber(getUploadValue(row, ["确认在途数量", "已确认在途", "确认在途", "在途数量", "confirmed_inbound", "in_transit"]));
     const etaDays = parseOptionalUploadNumber(getUploadValue(row, ["ETA（天）", "eta天", "到货天数", "预计到货天数", "eta_days", "eta"]));
     const available = parseOptionalUploadNumber(getUploadValue(row, ["可用库存", "可调库存", "available", "available_stock"]));
     const safety = parseOptionalUploadNumber(getUploadValue(row, ["安全库存", "保护库存", "safety", "safety_stock"]));
-    const dailyDemand = dailyDemandInput ?? (sales28 === null ? null : sales28 / 28);
-    const hasInvalidNumber = [physical, sales28, dailyDemandInput, confirmedInbound, etaDays, available, safety]
+    const salesDays = inStockDays ?? 28;
+    const dailyDemand = dailyDemandInput ?? (sales28 === null ? null : sales28 / salesDays);
+    const hasInvalidNumber = [physical, sales28, inStockDays, dailyDemandInput, confirmedInbound, etaDays, available, safety]
       .some((value) => value !== null && (!Number.isFinite(value) || value < 0));
     const hasOperatingValue = [physical, dailyDemand, demandMultiplier, confirmedInbound, available, safety].some((value) => value !== null);
-    if (!sku || !storeCode || hasInvalidNumber || (demandMultiplier !== null && (!Number.isFinite(demandMultiplier) || demandMultiplier <= 0 || demandMultiplier > 10)) || !hasOperatingValue || (etaDays !== null && confirmedInbound === null)) {
+    if (!sku || !storeCode || hasInvalidNumber || (sales28 !== null && salesDays <= 0) || (demandMultiplier !== null && (!Number.isFinite(demandMultiplier) || demandMultiplier <= 0 || demandMultiplier > 10)) || !hasOperatingValue || (etaDays !== null && confirmedInbound === null)) {
       skippedRows += 1;
       return;
     }
@@ -1920,6 +2227,8 @@ function parseOperatingSnapshot(rows) {
       sku: skuKey(sku),
       storeCode: String(storeCode).toUpperCase(),
       physical,
+      sales28,
+      inStockDays,
       dailyDemand,
       demandMultiplier,
       confirmedInbound,
@@ -1954,6 +2263,7 @@ function applyOperatingSnapshot(records) {
       if (skuKey(record.sku) !== entry.sku) return;
       if (record.target.code === entry.storeCode) {
         if (entry.physical !== null) record.target.physical = entry.physical;
+        if (entry.inStockDays !== null) record.target.inStockDays = entry.inStockDays;
         if (entry.dailyDemand !== null) record.target.dailyDemand = entry.dailyDemand;
         if (entry.demandMultiplier !== null) record.target.demandMultiplier = entry.demandMultiplier;
         if (entry.confirmedInbound !== null) {
@@ -1970,6 +2280,9 @@ function applyOperatingSnapshot(records) {
       record.sources.forEach((source) => {
         if (source.code !== entry.storeCode) return;
         if (entry.physical !== null) source.stock = entry.physical;
+        if (entry.inStockDays !== null) source.inStockDays = entry.inStockDays;
+        if (entry.dailyDemand !== null) source.dailyDemand = entry.dailyDemand;
+        if (entry.demandMultiplier !== null) source.demandMultiplier = entry.demandMultiplier;
         if (entry.safety !== null) source.safety = entry.safety;
         if (entry.available !== null) {
           source.available = entry.available;
@@ -2059,6 +2372,7 @@ function downloadOperatingSnapshotTemplate() {
     addRow(record.sku, record.target.code, [
       record.target.physical,
       Math.round(record.target.dailyDemand * 28),
+      28,
       record.target.dailyDemand,
       record.target.demandMultiplier ?? 1,
       confirmedInbound?.quantity ?? record.target.inbound ?? "",
@@ -2067,11 +2381,21 @@ function downloadOperatingSnapshotTemplate() {
       ""
     ]);
     record.sources.forEach((source) => {
-      addRow(record.sku, source.code, [source.stock, "", "", "", "", "", source.available, source.safety]);
+      addRow(record.sku, source.code, [
+        source.stock,
+        source.dailyDemand ? Math.round(source.dailyDemand * 28) : "",
+        source.dailyDemand ? 28 : "",
+        source.dailyDemand ?? "",
+        source.demandMultiplier ?? "",
+        "",
+        "",
+        source.available,
+        source.safety
+      ]);
     });
   });
   downloadCsv([
-    ["货号", "门店编码", "当前实物", "近28天销量", "日均动销", "活动系数", "确认在途数量", "ETA（天）", "可用库存", "安全库存"],
+    ["货号", "门店编码", "当前实物", "近28天销量", "有货天数", "日均动销", "活动系数", "确认在途数量", "ETA（天）", "可用库存", "安全库存"],
     ...rows.values()
   ], "经营快照模板.csv");
   showToast("已生成经营快照模板，可填写后上传到本机 Demo。");
@@ -2084,12 +2408,12 @@ function downloadRateCardTemplate() {
       const key = routeKey(source.code, record.target.code);
       if (!routes.has(key)) {
         const fallback = getFallbackRouteQuote(source, record.target);
-        routes.set(key, [source.code, record.target.code, fallback.parcelCost, fallback.etaDays]);
+        routes.set(key, [source.code, record.target.code, fallback.parcelCost, fallback.etaDays, fallback.etaHours, "", "", "", "", ""]);
       }
     });
   });
   downloadCsv([
-    ["来源门店编码", "目的门店编码", "单包成本", "预计时效（天）"],
+    ["来源门店编码", "目的门店编码", "单包成本", "预计时效（天）", "预计时效（小时）", "截单时间", "截单后顺延小时", "出库揽收时长（小时）", "收货上架时长（小时）", "时效波动缓冲（小时）"],
     ...routes.values()
   ], "线路运价表模板.csv");
   showToast("已生成线路运价表模板，可修改后上传到本机 Demo。");
@@ -2104,9 +2428,9 @@ function downloadProductParametersTemplate() {
       seenSkus.add(key);
       return true;
     })
-    .map((record) => [record.sku, "", "", ""]);
+    .map((record) => [record.sku, "", "", "", inferCityScope(record)?.join("、") || ""]);
   downloadCsv([
-    ["货号", "毛利率", "单包容量", "商品生命周期"],
+    ["货号", "毛利率", "单包容量", "商品生命周期", "可售城市"],
     ...rows
   ], "商品经营参数模板.csv");
   showToast("已生成商品经营参数模板，可填写后上传到本机 Demo。");
@@ -2187,7 +2511,7 @@ function renderRules() {
     const actionable = records.filter((record) => record.decision !== "暂不建议" && record.quantity > 0);
     const splitSourceCount = actionable.filter((record) => record.allocations.length > 1).length;
     const rateMode = state.settings.allowFallbackRates ? "未维护线路按演示回退价试算" : "仅采用已维护运价的线路";
-    status.textContent = `本轮 ${formatNumber(actionable.length)} 条建议已先锁定同 SKU 共享余量；${splitSourceCount ? `${formatNumber(splitSourceCount)} 条建议使用多来源补足；` : ""}${rateMode}。`;
+    status.textContent = `本轮 ${formatNumber(actionable.length)} 条建议已先锁定同 SKU 共享余量；候选来源已通过城市范围与来源保护校验，再按机会成本、时效和合单增量成本排序。${splitSourceCount ? `${formatNumber(splitSourceCount)} 条建议使用多来源补足；` : ""}${rateMode}。`;
   }
   refreshIcons();
 }
@@ -2267,6 +2591,7 @@ function resetDemo() {
   state.inTransitTransfers = new Map();
   state.flow = createInitialFlow();
   state.pendingChanges = [];
+  state.calculationAt = new Date();
   state.lastRun = hasFrSnapshot ? "已恢复 FR 测试库只读快照" : "已恢复默认演示快照";
   ["#operatingSnapshotFile", "#rateCardFile", "#productParametersFile", "#storeConstraintsFile"].forEach((selector) => {
     const input = document.querySelector(selector);
@@ -2285,7 +2610,8 @@ function resetDemo() {
 
 function applyOptimization(message) {
   readRuleInputs();
-  state.lastRun = message || `已按 ${state.settings.coverageDays} 天覆盖 + ${state.settings.demandBufferDays} 天动销缓冲、全网 SKU 协同分配与合单成本完成本轮计算`;
+  state.calculationAt = new Date();
+  state.lastRun = message || `已按 ${state.settings.coverageDays} 天覆盖、来源机会成本、线路时效与合单成本完成本轮计算`;
   renderAllPanels();
   showToast("本机优化已完成，原始 FR 测试库未发生任何写入。");
 }

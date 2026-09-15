@@ -111,6 +111,115 @@ assert.equal(importedSnapshot.sourceStock, 210);
 assert.equal(importedSnapshot.sourceAvailable, 170);
 assert.equal(importedSnapshot.sourceSafety, 40);
 
+const correctedDemand = vm.runInContext(`
+  (() => {
+    const parsed = parseOperatingSnapshot([
+      { "货号": "DEMAND-TEST", "门店编码": "STORE-1", "近28天销量": "280", "有货天数": "14" }
+    ]);
+    return parsed.records.get("DEMAND-TEST::STORE-1");
+  })()
+`, context);
+assert.equal(correctedDemand.dailyDemand, 20);
+assert.equal(correctedDemand.inStockDays, 14);
+
+const cityRestriction = vm.runInContext(`
+  (() => {
+    state.productParameters.records.set("CITY-TEST", { grossMargin: null, parcelCapacity: null, lifecycle: "", allowedCities: ["北京"] });
+    const profile = buildDemandProfile({
+      id: "CITY-TEST-1",
+      sku: "CITY-TEST",
+      product: "北京限定测试商品",
+      price: 100,
+      captureRate: 1,
+      target: { code: "SH-STORE", city: "上海", physical: 0, inbound: 0, dailyDemand: 10 },
+      sources: [{ code: "BJ-STORE", city: "北京", stock: 100, safety: 10, available: 90 }]
+    });
+    return { preHoldReason: profile.preHoldReason, candidateCount: profile.candidates.length };
+  })()
+`, context);
+assert.match(cityRestriction.preHoldReason, /不允许调入 上海/);
+assert.equal(cityRestriction.candidateCount, 0);
+
+const sourceOpportunitySelection = vm.runInContext(`
+  (() => {
+    state.settings.coverageDays = 7;
+    state.settings.urgentCoverageDays = 2;
+    state.settings.demandBufferDays = 0.5;
+    state.settings.sourceProtectionDays = 7;
+    state.settings.strategicStore = "none";
+    state.rateCard = { fileName: "", routes: new Map(), skippedRows: 0 };
+    const record = {
+      id: "OPPORTUNITY-TEST",
+      sku: "OPPORTUNITY-TEST",
+      product: "来源机会成本测试",
+      price: 100,
+      captureRate: 1,
+      target: { code: "TARGET-A", city: "北京", physical: 10, inbound: 0, dailyDemand: 10 },
+      sources: [
+        { code: "SOURCE-HIGH", city: "北京", stock: 200, safety: 10, available: 190, dailyDemand: 20 },
+        { code: "SOURCE-LOW", city: "北京", stock: 200, safety: 10, available: 190, dailyDemand: 2 }
+      ]
+    };
+    const profile = buildDemandProfile(record);
+    const result = allocateAcrossNetwork([profile]);
+    const allocation = result.allocations.get(record.id)[0];
+    return {
+      source: allocation.source.code,
+      opportunityCost: allocation.sourceOpportunityCost,
+      hasArrivalUrgency: profile.hasArrivalUrgency
+    };
+  })()
+`, context);
+assert.equal(sourceOpportunitySelection.source, "SOURCE-LOW");
+assert.equal(sourceOpportunitySelection.opportunityCost, 0);
+assert.equal(sourceOpportunitySelection.hasArrivalUrgency, true);
+
+const stockConstrainedHold = vm.runInContext(`
+  (() => {
+    const record = {
+      id: "STOCK-CONSTRAINT-TEST",
+      sku: "STOCK-CONSTRAINT-TEST",
+      product: "库存约束测试",
+      price: 100,
+      captureRate: 1,
+      target: { code: "TARGET-STOCK", city: "北京", physical: 60, inbound: 0, dailyDemand: 10 },
+      sources: [{ code: "SOURCE-STOCK", city: "北京", stock: 10, safety: 10, available: 0, dailyDemand: 2 }]
+    };
+    const profile = buildDemandProfile(record);
+    const result = allocateAcrossNetwork([profile]);
+    return {
+      allocated: result.allocations.get(record.id).length,
+      economicBlocked: Boolean(profile.economicBlocked)
+    };
+  })()
+`, context);
+assert.equal(stockConstrainedHold.allocated, 0);
+assert.equal(stockConstrainedHold.economicBlocked, false);
+
+const routeTiming = vm.runInContext(`
+  (() => {
+    state.calculationAt = new Date(2026, 0, 1, 18, 0, 0);
+    state.rateCard.routes.set("TIME-SOURCE::TIME-TARGET", {
+      parcelCost: 10,
+      etaDays: null,
+      etaHours: 2,
+      cutoffHour: 17,
+      cutoffDelayHours: 12,
+      handlingHours: 1,
+      receivingHours: 1,
+      volatilityHours: 1
+    });
+    const quote = getRouteQuote(
+      { code: "TIME-SOURCE", city: "北京" },
+      { code: "TIME-TARGET", city: "北京" }
+    );
+    return { etaHours: quote.etaHours, cutoffWaitHours: quote.cutoffWaitHours, hasTimeBreakdown: quote.hasTimeBreakdown };
+  })()
+`, context);
+assert.equal(routeTiming.etaHours, 17);
+assert.equal(routeTiming.cutoffWaitHours, 12);
+assert.equal(routeTiming.hasTimeBreakdown, true);
+
 const snapshotContext = { document: { addEventListener() {} }, window: {} };
 vm.createContext(snapshotContext);
 vm.runInContext(fs.readFileSync("fr-demo-data.js", "utf8"), snapshotContext);
@@ -127,6 +236,21 @@ const realSnapshot = vm.runInContext(`
       actionable: records.filter((record) => record.decision !== "暂不建议" && record.quantity > 0).length,
       groups: groups.length,
       safeSources: records.every((record) => record.sources.every((source) => source.stock >= source.safety)),
+      sourceProtectionSatisfied: (() => {
+        const allocationsBySource = new Map();
+        records.forEach((record) => {
+          record.allocations.forEach((allocation) => {
+            const key = skuKey(record.sku) + "::" + allocation.source.code;
+            const current = allocationsBySource.get(key) || { record, source: allocation.source, quantity: 0 };
+            current.quantity += allocation.quantity;
+            allocationsBySource.set(key, current);
+          });
+        });
+        return [...allocationsBySource.values()].every(({ record, source, quantity }) => {
+          const protection = getSourceProtection(source, record).protectionStock;
+          return source.stock - getInTransitOutboundQuantity(record, source.code) - quantity >= protection;
+        });
+      })(),
       activeRoute: (() => {
         const group = groups[0];
         activateFlowGroup(group.key);
@@ -144,6 +268,7 @@ assert.match(realSnapshot.firstId, /^FR-/);
 assert.ok(realSnapshot.actionable > 0);
 assert.ok(realSnapshot.groups > 0);
 assert.equal(realSnapshot.safeSources, true);
+assert.equal(realSnapshot.sourceProtectionSatisfied, true);
 assert.equal(realSnapshot.activeRoute.status, "已收货");
 assert.ok(realSnapshot.activeRoute.source);
 assert.ok(realSnapshot.activeRoute.target);

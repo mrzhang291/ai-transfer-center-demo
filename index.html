@@ -321,9 +321,10 @@
               <label class="number-field" for="sourceProtectionDays"><span>调出店保护天数</span><span class="number-field-control"><input class="numeric-control" id="sourceProtectionDays" type="number" min="1" max="60" step="1" value="7"><b>天</b></span></label>
               <label class="select-field" for="strategicStore"><span>战略门店</span><select class="select-control" id="strategicStore"><option value="BJSR04">北京 apm 三丽鸥</option><option value="BJSR02">北京合生汇三丽鸥</option><option value="none">不设战略门店</option></select></label>
               <label class="check-line"><input type="checkbox" checked disabled><span>调出店动态保护库存作为硬约束</span></label>
+              <label class="check-line"><input type="checkbox" checked disabled><span>战略门店作为来源时额外保留 50% 保护天数</span></label>
               <label class="check-line"><input type="checkbox" checked disabled><span>仅已确认且保护期内到货的在途计入库存位置</span></label>
               <label class="check-line"><input type="checkbox" checked disabled><span>在途 ETA 晚于预计断货日时自动升级加急</span></label>
-              <p class="rule-note">补调量按目标库存减库存位置计算；无 ETA 的在途继续按不可用处理。确认在途即使计入库存位置，也必须在断货前送达，否则优先寻找更快线路并升级处理。</p>
+              <p class="rule-note">补调量按目标库存减库存位置计算；无 ETA 的在途继续按不可用处理。对当前已进入紧急风险线的门店，只有断货前可到店的来源才会优先覆盖缺口。</p>
             </section>
 
             <section class="panel rule-section">
@@ -332,7 +333,9 @@
               <label class="number-field" for="minimumNetContribution"><span>合单最低净贡献</span><span class="number-field-control"><b>¥</b><input class="numeric-control" id="minimumNetContribution" type="number" min="0" max="1000000" step="10" value="0"></span></label>
               <label class="check-line"><input type="checkbox" checked disabled><span>同一 SKU 的来源余量全网共享</span></label>
               <label class="check-line"><input type="checkbox" checked disabled><span>先保高风险与战略门店，再分配富余</span></label>
-              <p class="rule-note" id="allocationRuleStatus">按风险、门店优先级、线路时效和合单增量成本分配。</p>
+              <label class="check-line"><input type="checkbox" checked disabled><span>商品城市范围不符时，不进入调拨候选</span></label>
+              <label class="check-line"><input type="checkbox" checked disabled><span>同等可达来源优先选择调后销售损失更小的门店</span></label>
+              <p class="rule-note" id="allocationRuleStatus">按风险、门店优先级、来源机会成本、线路时效和合单增量成本分配。</p>
             </section>
 
             <section class="panel rule-section">
@@ -348,7 +351,7 @@
               <label class="number-field" for="crossCityCost"><span>跨城单包回退价</span><span class="number-field-control"><b>¥</b><input class="numeric-control" id="crossCityCost" type="number" min="0" max="10000" step="0.1" value="22"><b>/ 包</b></span></label>
               <label class="number-field" for="parcelCapacity"><span>默认单包容量</span><span class="number-field-control"><input class="numeric-control" id="parcelCapacity" type="number" min="1" max="10000" step="1" value="60"><b>件</b></span></label>
               <label class="check-line"><input id="allowFallbackRates" type="checkbox" checked><span>允许未维护线路参与演示试算</span></label>
-              <p class="rule-note cost-model-note">关闭后，未命中运价表的路线不会生成建议。真实线路与包装参数请在数据接入维护。</p>
+              <p class="rule-note cost-model-note">线路资料可补充截单时间、出库揽收、收货上架与时效波动缓冲。截单后的订单会顺延一班，实际 ETA 以这些环节合计后参与判断。</p>
             </section>
 
             <section class="panel rule-section ai-rule-section">
@@ -377,7 +380,7 @@
                 <button class="secondary-button" type="button" data-action="download-snapshot-template"><i data-lucide="file-down" aria-hidden="true"></i>下载模板</button>
               </div>
               <p class="upload-status" id="operatingSnapshotStatus" aria-live="polite">未上传，当前采用演示经营快照。</p>
-              <p class="rule-note">字段：货号、门店编码；当前实物、近 28 天销量或日均动销、活动系数、确认在途数量与 ETA 均可选。</p>
+              <p class="rule-note">字段：货号、门店编码；当前实物、近 28 天销量或日均动销、有货天数、活动系数、确认在途数量与 ETA 均可选。调入与潜在调出门店都应提供动销。</p>
             </section>
 
             <section class="panel data-section">
@@ -388,7 +391,7 @@
                 <button class="secondary-button" type="button" data-action="download-rate-template"><i data-lucide="file-down" aria-hidden="true"></i>下载模板</button>
               </div>
               <p class="upload-status" id="rateCardStatus" aria-live="polite">未上传，当前采用演示试算价。</p>
-              <p class="rule-note">字段：来源门店编码、目的门店编码、单包成本；预计时效（天）可选。</p>
+              <p class="rule-note">字段：来源门店编码、目的门店编码、单包成本；可补充时效、截单、出库揽收、收货上架与路况缓冲。</p>
             </section>
 
             <section class="panel data-section">
@@ -399,7 +402,7 @@
                 <button class="secondary-button" type="button" data-action="download-product-template"><i data-lucide="file-down" aria-hidden="true"></i>下载模板</button>
               </div>
               <p class="upload-status" id="productParametersStatus" aria-live="polite">未上传，当前采用全局毛利与单包容量试算。</p>
-              <p class="rule-note">字段：货号；毛利率、单包容量、商品生命周期均可选。</p>
+              <p class="rule-note">字段：货号；毛利率、单包容量、商品生命周期和可售城市均可选。限定商品未维护范围时，仅按品名中的城市限定识别。</p>
             </section>
 
             <section class="panel data-section">
