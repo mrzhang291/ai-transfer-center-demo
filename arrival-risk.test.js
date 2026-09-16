@@ -232,7 +232,17 @@ const realSnapshot = vm.runInContext(`
     return {
       seedCount: transferSeed.length,
       pilotStoreCount: snapshotMetadata.pilotStoreCount,
+      scopeLabel: snapshotMetadata.scopeLabel,
       firstId: transferSeed[0].id,
+      maxRecordsPerTarget: (() => {
+        const countByTarget = new Map();
+        transferSeed.forEach((record) => {
+          countByTarget.set(record.target.code, (countByTarget.get(record.target.code) || 0) + 1);
+        });
+        return Math.max(...countByTarget.values());
+      })(),
+      allStoresInBeijing: transferSeed.every((record) => record.target.city === "北京"
+        && record.sources.every((source) => source.city === "北京")),
       actionable: records.filter((record) => record.decision !== "暂不建议" && record.quantity > 0).length,
       groups: groups.length,
       safeSources: records.every((record) => record.sources.every((source) => source.stock >= source.safety)),
@@ -262,8 +272,12 @@ const realSnapshot = vm.runInContext(`
     };
   })()
 `, snapshotContext);
-assert.equal(realSnapshot.seedCount, 80);
-assert.equal(realSnapshot.pilotStoreCount, 15);
+assert.ok(realSnapshot.seedCount > 0);
+assert.ok(realSnapshot.seedCount <= 24);
+assert.equal(realSnapshot.pilotStoreCount, 4);
+assert.equal(realSnapshot.scopeLabel, "北京门店组");
+assert.equal(realSnapshot.allStoresInBeijing, true);
+assert.ok(realSnapshot.maxRecordsPerTarget <= 6);
 assert.match(realSnapshot.firstId, /^FR-/);
 assert.ok(realSnapshot.actionable > 0);
 assert.ok(realSnapshot.groups > 0);

@@ -211,7 +211,7 @@ function createInitialFlow() {
     activeGroupKey: null,
     activeRoute: null,
     events: [
-      { title: "补调方案已生成", detail: hasFrSnapshot ? "已按 FR 测试库只读快照、试点参数与全网分配规则完成本轮计算。" : "按默认库存、毛利、物流试算和审批规则完成本轮模拟。", time: "09:00", type: "normal" },
+      { title: "补调方案已生成", detail: hasFrSnapshot ? `已按 FR 测试库只读快照、试点参数与${snapshotMetadata.scopeLabel || "试点范围"}分配规则完成本轮计算。` : "按默认库存、毛利、物流试算和审批规则完成本轮模拟。", time: "09:00", type: "normal" },
       { title: "调出店保护库存已锁定", detail: "每个调出来源均保留动态保护库存，分配不会突破安全边界。", time: "09:00", type: "normal" }
     ]
   };
@@ -303,12 +303,13 @@ function getSnapshotContext() {
     ? `${snapshotMetadata.salesWindowStart} 至 ${snapshotMetadata.salesWindowEnd}`
     : "近 28 天";
   const pilotStoreCount = Number(snapshotMetadata.pilotStoreCount) || new Set(transferSeed.map((record) => record.target.code)).size;
+  const scopeLabel = snapshotMetadata.scopeLabel || "试点门店组";
   return {
     title: "FR 测试库只读快照",
-    copy: "本机计算，不回写源库",
+    copy: `${scopeLabel} · 本机计算，不回写源库`,
     tag: `销量口径 ${salesWindow}`,
-    network: `当前快照：${formatNumber(pilotStoreCount)} 家试点门店 · ${formatNumber(transferSeed.length)} 条待补调 SKU`,
-    operatingSource: `FR 只读快照：${formatNumber(pilotStoreCount)} 家试点门店，销量 ${salesWindow}`
+    network: `当前范围：${scopeLabel} · ${formatNumber(pilotStoreCount)} 家试点门店 · ${formatNumber(transferSeed.length)} 条待补调 SKU`,
+    operatingSource: `FR 只读快照：${scopeLabel} ${formatNumber(pilotStoreCount)} 家门店，销量 ${salesWindow}`
   };
 }
 
@@ -1326,7 +1327,7 @@ function renderWorkflow(summary) {
   document.querySelector("#dataWorkflowStatus").textContent = importedTypes
     ? `已接入 ${formatNumber(importedTypes)} 类经营资料`
     : "库存与销量快照已就绪";
-  document.querySelector("#rulesWorkflowStatus").textContent = `${state.settings.coverageDays} 天覆盖 + ${state.settings.demandBufferDays} 天缓冲 · 全网 SKU 协同分配`;
+  document.querySelector("#rulesWorkflowStatus").textContent = `${state.settings.coverageDays} 天覆盖 + ${state.settings.demandBufferDays} 天缓冲 · 北京试点 SKU 协同分配`;
   document.querySelector("#optimizationWorkflowStatus").textContent = `${formatNumber(summary.actionable.length)} 条可执行建议`;
   document.querySelector("#executionWorkflowStatus").textContent = summary.awaitingApproval
     ? `${formatNumber(summary.awaitingApproval)} 单待审核`
@@ -1644,47 +1645,42 @@ function renderDetail(records) {
         <span>实物 ${formatNumber(source.stock)} · 保护库存 ${formatNumber(protection.protectionStock)}${protection.isDynamic ? "（动态）" : ""} · ${route} · ETA ${formatRouteTiming(quote)} · ${formatMoney(quote.parcelCost)}/包 ${quote.isFallback ? "试算" : "运价表"}</span>
         <span>${escapeHtml(sourceMeta)}</span>
       </div>
-      <div class="source-right">${sourceDecision}<br>${cityAllowed && constraint.allowOutbound ? `来源机会成本 ${formatMoney(sourceOpportunityCost)} · 全网余 ${formatNumber(sourceRemaining)}` : "不占用来源库存"}</div>
+      <div class="source-right">${sourceDecision}<br>${cityAllowed && constraint.allowOutbound ? `来源机会成本 ${formatMoney(sourceOpportunityCost)} · 试点余量 ${formatNumber(sourceRemaining)}` : "不占用来源库存"}</div>
     </div>`;
   }).join("");
 
   const arrivalCoverageQuantity = Math.max(0, record.arrivalGapQuantity - record.arrivalGapRemaining);
-  const inboundTiming = Number.isFinite(record.firstInboundEtaDays)
-    ? `已确认在途最早 ${formatEta(record.firstInboundEtaDays)} 到货`
-    : "当前没有可抵减风险的确认在途";
-  const arrivalRiskNote = record.arrivalRisk
-    ? `到货可达性预警：预计第 ${record.arrivalDeadlineDays.toFixed(1)} 天出现断货，${inboundTiming}；到货前服务缺口约 ${formatNumber(record.arrivalGapQuantity)} 件。${record.arrivalGapRemaining > 0 ? `可在断货前抵达的调拨仅覆盖 ${formatNumber(arrivalCoverageQuantity)} 件，仍有 ${formatNumber(record.arrivalGapRemaining)} 件需加急处理。` : `本轮已优先安排 ${formatNumber(arrivalCoverageQuantity)} 件可在断货前抵达的货。`}`
-    : "";
-  const sourceReason = record.arrivalRisk && record.arrivalGapRemaining > 0
-    ? `可在第 ${record.arrivalDeadlineDays.toFixed(1)} 天前到货的来源不足，需人工加急、改走更快线路或接受断货风险。`
-    : record.arrivalRisk
-      ? `已优先分配 ETA 不晚于第 ${record.arrivalDeadlineDays.toFixed(1)} 天的来源，覆盖确认在途到货前的销售缺口。`
-    : record.decision === "在途"
-    ? `本笔已有 ${formatNumber(record.confirmedInbound)} 件确认在途，库存位置已抵减，本轮不重复占用来源库存。`
-    : record.decision === "已收货"
-      ? "本笔已收货，调入店实物库存已更新，后续建议将按新的库存位置重算。"
-    : record.holdReason
-    ? record.holdReason
-    : record.allocationGap > 0
-      ? `全网可调余量不足，本轮先覆盖 ${formatNumber(record.quantity)} 件，仍有 ${formatNumber(record.allocationGap)} 件缺口进入下一轮补货或调拨。`
-      : record.allocations.length > 1
-        ? `同一 SKU 的共享余量已统一扣减，本笔由 ${formatNumber(record.allocations.length)} 个来源分段补足，避免任一来源跌破动态保护库存。`
-    : record.isSameCity
-          ? "同城来源在不跌破动态保护库存前提下可足额覆盖需求。"
-          : "已在满足来源动态保护库存后，按来源机会成本、线路时效、合单成本和全网余量选择跨城来源。";
-  const sourceSelectionReason = record.allocations.length
-    ? `候选来源先通过商品城市范围与来源保护校验，再比较调后覆盖、来源销售损失、时效和合单增量成本；本笔预计来源机会成本 ${formatMoney(record.sourceOpportunityCost)}。`
-    : `商品城市范围为 ${record.productCityScope}；不符合城市范围、来源保护或时效要求的门店不会占用库存。`;
-  const rateLabel = record.usingFallbackRate ? "演示运价试算" : "上传运价表";
-  const financialReason = record.decision === "在途"
-    ? "本笔已发货并进入库存位置，本轮不重复计入调拨收益与物流成本。"
-    : record.decision === "已收货"
-      ? "本笔已完成收货，已完成的物流与收益不在下一轮补调建议中重复计算。"
-    : record.decision === "到货预警"
-      ? "常规调拨收益已按合单试算；到货前的服务缺口须走加急审批，不能只按常规物流成本判断。"
+  const salesDays = Number(record.target.inStockDays) > 0 ? Number(record.target.inStockDays) : 28;
+  const salesVolume = Math.round(record.target.dailyDemand * salesDays);
+  const salesFact = `近 ${formatNumber(salesDays)} 天销量 ${formatNumber(salesVolume)} 件，折算日销 ${record.target.dailyDemand.toFixed(1)} 件${record.demandMultiplier !== 1 ? `；活动系数 ${record.demandMultiplier.toFixed(2)}，预测日销 ${record.forecastDailyDemand.toFixed(1)} 件` : ""}。当前实物 ${formatNumber(record.target.physical)} 件，仅能覆盖 ${record.currentCoverageDays.toFixed(1)} 天。`;
+  const targetFact = `预测日销 ${record.forecastDailyDemand.toFixed(1)} 件 × 有效覆盖 ${record.effectiveCoverageDays.toFixed(1)} 天 = ${formatNumber(record.desiredTargetStock)} 件；结合当前实物${record.targetConstraint.minDisplay ? `、最低陈列 ${formatNumber(record.targetConstraint.minDisplay)} 件` : ""}${Number.isFinite(record.targetConstraint.maxCapacity) ? `、库容上限 ${formatNumber(record.targetConstraint.maxCapacity)} 件` : ""}后，目标库存为 ${formatNumber(record.targetStock)} 件。`;
+  const inventoryFact = `库存位置 ${formatNumber(record.inventoryPosition)} 件 = 实物 ${formatNumber(record.target.physical)} 件 - 已锁定调出 ${formatNumber(record.reservedOutbound)} 件 + 保护期内确认在途 ${formatNumber(record.confirmedInbound)} 件。${record.confirmedInboundLater ? `另有 ${formatNumber(record.confirmedInboundLater)} 件确认在途到货较晚，未计入。` : ""}${record.hasUnconfirmedInbound ? `另有 ${formatNumber(record.target.inbound)} 件在途没有 ETA 或确认状态，未计入。` : ""}`;
+  const sourceFact = record.allocations.length
+    ? record.allocations.map((allocation) => {
+      const protection = getSourceProtection(allocation.source, record, productParameters);
+      return `${escapeHtml(allocation.source.name)}：实物 ${formatNumber(allocation.source.stock)} 件，保护库存 ${formatNumber(protection.protectionStock)} 件，安全可调 ${formatNumber(allocation.sourceAvailable)} 件；本轮调出 ${formatNumber(allocation.quantity)} 件，调后覆盖 ${formatCoverageDays(allocation.sourcePostCoverageDays)}。`;
+    }).join(" ")
+    : "没有可在来源保护库存之上调出的货，本轮未占用任何来源库存。";
+  const allocationEtas = record.allocations.map((allocation) => allocation.etaDays).filter(Number.isFinite);
+  const earliestEta = allocationEtas.length ? Math.min(...allocationEtas) : record.etaDays;
+  const timingFact = record.arrivalRisk
+    ? `当前库存将在第 ${record.arrivalDeadlineDays.toFixed(1)} 天前断货；最快常规 ETA 为 ${formatEta(earliestEta)}，断货前可到店 ${formatNumber(arrivalCoverageQuantity)} 件，仍有 ${formatNumber(record.arrivalGapRemaining)} 件无法由常规调拨及时覆盖。`
+    : `当前库存可覆盖 ${record.currentCoverageDays.toFixed(1)} 天；所选路线 ETA 为 ${formatEta(record.etaDays)}，未产生到货前断供预警。`;
+  const economicsFact = record.allocations.length
+    ? `预计保护销售额 ${formatMoney(record.salesProtected)} × 毛利率 ${record.productMargin}% = 毛利 ${formatMoney(record.salesProtected * record.productMargin / 100)}；扣除来源机会成本 ${formatMoney(record.sourceOpportunityCost)} 和新增物流 ${formatMoney(record.logisticsCost)} 后，预计增量贡献 ${formatMoney(record.contribution)}。`
+    : "本轮未形成调拨，不计物流成本和预计增量贡献。";
+  const trialFact = record.usingFallbackRate
+    ? `本笔 ETA 和物流成本按北京同城演示参数 ${formatEta(record.etaDays)}、${formatMoney(record.parcelCost)}/包试算；毛利率 ${record.productMargin}%、单包容量 ${formatNumber(record.productParcelCapacity)} 件同为试点参数。`
+    : `本笔 ETA 和物流成本来自上传运价表；毛利率 ${record.productMargin}% ${record.usingImportedProductParameters ? "来自商品参数" : "仍使用试点参数"}。`;
+  const decisionFact = record.decision === "到货预警"
+    ? `本轮安排 ${formatNumber(record.quantity)} 件作为后续补充，但不能消除断货前缺口，因此进入加急审核。`
     : record.decision === "暂不建议"
-    ? record.holdReason
-    : `按 ${record.productMargin}% ${record.usingImportedProductParameters ? "商品毛利率" : "试点毛利率"}、${formatMoney(record.sourceOpportunityCost)} 来源机会成本与 ${formatMoney(record.logisticsCost)} ${rateLabel}计算，调拨仍有正向贡献。`;
+      ? record.holdReason
+      : record.decision === "在途"
+        ? "本笔已发货并计入确认在途，下一轮不会重复占用同一来源库存。"
+        : record.decision === "已收货"
+          ? "本笔已收货，库存位置已更新，下一轮将按新库存重新计算。"
+          : `来源保护、时效和经济性校验均通过，本轮建议 ${formatNumber(record.quantity)} 件进入审核。`;
   const routeLabel = record.allocations.length > 1 ? "多来源补足" : record.isSameCity ? "同城直调" : "跨城直调";
   const transferLegs = getTransferLegs(record);
   const transferSourceMarkup = transferLegs.map((allocation) => {
@@ -1693,13 +1689,6 @@ function renderDetail(records) {
       : `${allocation.source.name} · ${formatNumber(allocation.quantity)} 件`;
     return `<span class="transfer-store-name">${escapeHtml(label)}</span>`;
   }).join("");
-  const targetStockReason = record.targetConstraint.allowInbound
-    ? `目标库存按 ${record.lifecycleCoverageDays} 天基础覆盖 + ${record.demandBufferDays} 天动销波动缓冲计算${record.demandMultiplier !== 1 ? `，并采用 ${record.demandMultiplier.toFixed(2)} 倍活动期预测日销` : ""}${record.priorityMultiplier !== 1 ? `，再叠加 ${record.priorityMultiplier.toFixed(2)} 倍门店优先级` : ""}${Number.isFinite(record.targetConstraint.maxCapacity) ? `；库容上限为 ${formatNumber(record.targetConstraint.maxCapacity)} 件` : ""}。`
-    : "该门店当前被设置为禁止调入，本轮不生成调拨。";
-  const demandBasis = record.target.inStockDays && record.target.inStockDays !== 28
-    ? `近 28 天销量按 ${formatNumber(record.target.inStockDays)} 个有货天数折算`
-    : "近 28 天销量按 28 天折算";
-
   panel.innerHTML = `
     <div class="panel-header">
       <div>
@@ -1775,19 +1764,16 @@ function renderDetail(records) {
       </div>
 
       <div class="detail-section">
-        <h4>推荐依据</h4>
+        <h4>本笔事实依据</h4>
         <ul class="reason-list">
-          <li>${demandBasis}：日均动销 ${record.target.dailyDemand.toFixed(1)} 件${record.demandMultiplier !== 1 ? `，活动期预测日销 ${record.forecastDailyDemand.toFixed(1)} 件` : ""}；当前实物按预测日销仅覆盖 ${record.currentCoverageDays.toFixed(1)} 天，低于 ${state.settings.urgentCoverageDays} 天即进入高风险优先队列。</li>
-          <li>${targetStockReason}</li>
-          <li>${record.confirmedInbound ? `保护期 ${record.lifecycleCoverageDays} 天内有 ${formatNumber(record.confirmedInbound)} 件已确认在途，已计入库存位置。` : "保护期内没有可抵减缺货风险的已确认在途库存。"}${record.confirmedInboundLater ? `另有 ${formatNumber(record.confirmedInboundLater)} 件到货较晚，本轮不抵减。` : ""}${record.hasUnconfirmedInbound ? `另有 ${formatNumber(record.target.inbound)} 件在途未携带到货承诺，仍按不可用处理。` : ""}</li>
-          ${arrivalRiskNote ? `<li class="arrival-risk-note">${arrivalRiskNote}</li>` : ""}
-          <li>${sourceReason}</li>
-          <li>${sourceSelectionReason}</li>
-          <li>${record.hasCityRestriction ? `该商品限定在 ${record.productCityScope} 销售，范围外门店已被硬性排除。` : "该商品未维护城市限定范围，当前不限制跨城市候选；正式运行可通过商品参数上传维护。"}</li>
-          <li>商品生命周期：${escapeHtml(record.productLifecycle)}；${record.usingImportedProductParameters ? "毛利与装箱容量已按上传商品参数计算。" : "未上传商品参数，当前采用试点毛利与统一单包容量。"}</li>
-          <li>${financialReason}</li>
-          <li>${record.usingFallbackRate ? "本路线尚未覆盖上传运价表，当前使用 Demo 试算价，不能作为实际成本决策。" : `${record.hasTimeBreakdown ? "本路线 ETA 已计入截单、出库、收货或时效缓冲；" : "本路线已命中上传运价表；"}装箱容量、附加费与实际结算仍应在正式接入时校验。`}</li>
-          <li>${record.requiresEscalation ? "战略门店、战略来源、跨城、分来源或残余缺口已触发升级审批。" : "本笔为常规风险，可由运营常规审核。"}</li>
+          <li><strong>销售与库存：</strong>${salesFact}</li>
+          <li><strong>补货目标：</strong>${targetFact}</li>
+          <li><strong>库存位置：</strong>${inventoryFact}</li>
+          <li><strong>来源事实：</strong>${sourceFact}</li>
+          <li class="${record.arrivalRisk ? "arrival-risk-note" : ""}"><strong>时效判断：</strong>${timingFact}</li>
+          <li><strong>经济账：</strong>${economicsFact}</li>
+          <li><strong>试算口径：</strong>${trialFact}</li>
+          <li><strong>结论：</strong>${decisionFact}</li>
         </ul>
       </div>
 

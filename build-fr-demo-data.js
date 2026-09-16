@@ -9,8 +9,10 @@ const WINDOW_DAYS = 28;
 const TARGET_COVERAGE_DAYS = 7.5;
 const SOURCE_PROTECTION_DAYS = 7;
 const SOURCE_SAFETY_FLOOR = 2;
-const MAX_RECORDS = 80;
+const MAX_RECORDS = 24;
 const MAX_RECORDS_PER_TARGET = 6;
+const PILOT_CITY = "北京";
+const PILOT_STORE_LIMIT = 4;
 const mysqlBin = process.env.MYSQL_BIN || "C:\\Program Files\\MySQL\\MySQL Server 8.0\\bin\\mysql.exe";
 const db = {
   host: process.env.FR_DB_HOST,
@@ -89,17 +91,11 @@ function storeSkuKey(storeCode, sku) {
 function chooseRecords(candidates) {
   const chosen = [];
   const perTarget = new Map();
-  const selected = new Set();
   candidates.forEach((candidate) => {
     const count = perTarget.get(candidate.target.code) || 0;
     if (count >= MAX_RECORDS_PER_TARGET || chosen.length >= MAX_RECORDS) return;
     chosen.push(candidate);
-    selected.add(candidate.id);
     perTarget.set(candidate.target.code, count + 1);
-  });
-  candidates.forEach((candidate) => {
-    if (chosen.length >= MAX_RECORDS || selected.has(candidate.id)) return;
-    chosen.push(candidate);
   });
   return chosen;
 }
@@ -144,9 +140,10 @@ const pilotStores = mysqlQuery(`
     AND s.t_outdate BETWEEN ${salesWindowStart} AND ${salesWindowEnd}
     AND COALESCE(d.names_col, '') LIKE '%三丽鸥%'
     AND COALESCE(d.names_col, '') NOT REGEXP '仓|WH'
+    AND COALESCE(NULLIF(d.shi, ''), NULLIF(d.sheng, ''), '') IN ('北京', '北京市')
   GROUP BY s.t_cusno, d.names_col, d.shi, d.sheng
   ORDER BY SUM(s.s_nb) DESC, s.t_cusno
-  LIMIT 15
+  LIMIT ${PILOT_STORE_LIMIT}
 `).map((store) => ({
   ...store,
   code: String(store.code).toUpperCase(),
@@ -155,7 +152,7 @@ const pilotStores = mysqlQuery(`
   units: number(store.units)
 }));
 
-assert.equal(pilotStores.length, 15, "Expected 15 active retail pilot stores.");
+assert.equal(pilotStores.length, PILOT_STORE_LIMIT, `Expected ${PILOT_STORE_LIMIT} active ${PILOT_CITY} retail pilot stores.`);
 const storeCodes = pilotStores.map((store) => store.code);
 const storeCodeList = storeCodes.map(sqlString).join(", ");
 const storesByCode = new Map(pilotStores.map((store) => [store.code, store]));
@@ -276,7 +273,8 @@ assert.ok(records.every((record) => record.sources.every((source) => source.avai
 
 const data = {
   metadata: {
-    source: "FR 测试库只读快照",
+    source: `FR 测试库只读快照（${PILOT_CITY}门店组）`,
+    scopeLabel: `${PILOT_CITY}门店组`,
     generatedAt: new Date().toISOString(),
     salesWindowStart: toIsoDate(salesWindowStart),
     salesWindowEnd: toIsoDate(salesWindowEnd),

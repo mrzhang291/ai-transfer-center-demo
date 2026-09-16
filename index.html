@@ -8,8 +8,8 @@
   <link rel="stylesheet" href="styles.css?v=20260914-fr5">
   <script defer src="https://cdn.jsdelivr.net/npm/lucide@0.468.0/dist/umd/lucide.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-  <script defer src="fr-demo-data.js?v=20260914-fr1"></script>
-  <script defer src="app.js?v=20260914-fr4"></script>
+  <script defer src="fr-demo-data.js?v=20260916-bj1"></script>
+  <script defer src="app.js?v=20260916-bj1"></script>
 </head>
 <body>
   <div class="app-shell">
@@ -193,13 +193,9 @@
 
           <div class="filter-row plan-filter-row" aria-label="筛选调拨建议">
             <label class="field-inline" for="scopeSelect">
-              <span>网络范围</span>
+              <span>试点范围</span>
               <select class="select-control" id="scopeSelect">
-                <option value="all">全国网络</option>
-                <option value="north">华北门店组</option>
-                <option value="east">华东门店组</option>
-                <option value="central">华中门店组</option>
-                <option value="south">福建门店组</option>
+                <option value="all">北京试点门店</option>
               </select>
             </label>
             <label class="field-inline" for="statusSelect">
@@ -328,10 +324,10 @@
             </section>
 
             <section class="panel rule-section">
-              <div class="panel-header"><div><p class="eyebrow">全网分配</p><h3>共享货源与等待窗口</h3></div><i data-lucide="network" aria-hidden="true"></i></div>
+              <div class="panel-header"><div><p class="eyebrow">试点范围分配</p><h3>共享货源与等待窗口</h3></div><i data-lucide="network" aria-hidden="true"></i></div>
               <label class="number-field" for="minimumTransferQuantity"><span>非紧急最小调拨量</span><span class="number-field-control"><input class="numeric-control" id="minimumTransferQuantity" type="number" min="1" max="10000" step="1" value="2"><b>件</b></span></label>
               <label class="number-field" for="minimumNetContribution"><span>合单最低净贡献</span><span class="number-field-control"><b>¥</b><input class="numeric-control" id="minimumNetContribution" type="number" min="0" max="1000000" step="10" value="0"></span></label>
-              <label class="check-line"><input type="checkbox" checked disabled><span>同一 SKU 的来源余量全网共享</span></label>
+              <label class="check-line"><input type="checkbox" checked disabled><span>同一 SKU 的来源余量在北京试点内共享</span></label>
               <label class="check-line"><input type="checkbox" checked disabled><span>先保高风险与战略门店，再分配富余</span></label>
               <label class="check-line"><input type="checkbox" checked disabled><span>商品城市范围不符时，不进入调拨候选</span></label>
               <label class="check-line"><input type="checkbox" checked disabled><span>同等可达来源优先选择调后销售损失更小的门店</span></label>
